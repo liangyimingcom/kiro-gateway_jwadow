@@ -347,3 +347,269 @@ flowchart LR
 > **本文档目的**：帮助使用者了解风险暴露面，做出知情决策。  
 > **生成时间**：2026-05-28  
 > **分析版本**：v2.4.dev.13
+
+
+
+---
+
+## 7. 防御加固建议（合规使用 - 降低误伤率）
+
+> **适用场景**：合法使用单账号/团队账号时，如何让行为模式更接近正常 IDE 使用，
+> 避免因工具自动化特征被误判为滥用。
+
+### 7.1 建议总览
+
+```mermaid
+flowchart TD
+    subgraph 合规改进方向
+        A[添加客户端侧速率限制]
+        B[复用conversation_id模拟真实会话]
+        C[限制并发连接数]
+        D[保持UA与真实环境一致]
+        E[单账号使用 - 避免关联]
+        F[住宅网络直连 - 不用VPN]
+    end
+
+    A -->|降低| R1[规则1: 消耗峰值]
+    B -->|降低| R2[规则2: 对话模式]
+    C -->|降低| R1
+    D -->|降低| R3[规则3: IP/指纹]
+    E -->|降低| R3
+    F -->|降低| R3
+```
+
+### 7.2 具体建议
+
+| # | 改进项 | 当前状态 | 建议 | 降低的风险 |
+|---|--------|----------|------|-----------|
+| 1 | **添加请求速率限制** | 无任何限制 | 增加 RPM(requests/min) 和 TPH(tokens/hour) 上限 | 规则1 |
+| 2 | **复用 conversation_id** | 每次随机UUID | 对同一客户端会话复用稳定的conversation_id | 规则2 |
+| 3 | **降低并发连接** | max_connections=100 | 限制为 2-5 个并发（匹配真实 IDE 行为） | 规则1+3 |
+| 4 | **随真实版本更新 UA** | 硬编码固定版本 | 定期从官方 IDE 更新版本号 | 规则3 |
+| 5 | **单账号模式** | 支持多账号轮换 | 合规场景下只使用自己的单个账号 | 规则1+3 |
+| 6 | **住宅网络直连** | 支持 VPN/代理 | 合规场景不使用 VPN，直接连接 | 规则3 |
+| 7 | **请求间隔随机化** | 立即发送 | 添加 1-5s 随机间隔模拟人类节奏 | 规则1+2 |
+| 8 | **每日使用量监控** | 无自监控 | 增加每日 token 使用量统计 + 告警阈值 | 规则1 |
+
+### 7.3 合规使用模式 vs 异常使用模式
+
+```mermaid
+flowchart LR
+    subgraph 正常编程会话特征
+        N1["3-10个对话/天"]
+        N2["每个对话10-50次交互"]
+        N3["请求间隔30s-5min"]
+        N4["单一固定IP"]
+        N5["Token消耗平滑分布"]
+    end
+
+    subgraph 当前网关默认行为
+        A1["无限对话数/天"]
+        A2["每个对话1次请求"]
+        A3["请求间隔0s"]
+        A4["可能VPN/数据中心IP"]
+        A5["Token消耗突发尖峰"]
+    end
+
+    N1 -.- A1
+    N2 -.- A2
+    N3 -.- A3
+    N4 -.- A4
+    N5 -.- A5
+```
+
+---
+
+## 8. 检测系统技术原理分析
+
+> 基于公开的反欺诈技术文献推断 Kiro 检测系统可能采用的技术栈。
+
+### 8.1 检测系统架构推测
+
+```mermaid
+flowchart TD
+    subgraph 数据采集层
+        API[API Gateway 日志]
+        AUTH[认证服务日志]
+        BILL[计费系统事件]
+    end
+
+    subgraph 特征工程层
+        TS[时间序列聚合]
+        SESS[会话模式分析]
+        NET[网络指纹提取]
+    end
+
+    subgraph 检测引擎层
+        RULE[规则引擎 - 硬阈值]
+        ML[异常检测模型]
+        GRAPH[关联图谱分析]
+    end
+
+    subgraph 执行层
+        ALERT[告警审核]
+        SUSPEND[自动暂停]
+        BAN[永久封禁]
+    end
+
+    API --> TS
+    AUTH --> NET
+    BILL --> TS
+    API --> SESS
+    AUTH --> SESS
+
+    TS --> RULE
+    TS --> ML
+    SESS --> RULE
+    SESS --> ML
+    NET --> GRAPH
+    NET --> RULE
+
+    RULE --> ALERT
+    ML --> ALERT
+    GRAPH --> ALERT
+    ALERT --> SUSPEND
+    ALERT --> BAN
+```
+
+### 8.2 各检测维度的技术实现推测
+
+#### 规则1：消耗异常检测
+
+| 技术 | 实现方式 | 指标 |
+|------|----------|------|
+| **滑动窗口计数** | 30min/1h/24h 窗口内的 credit 消耗总量 | credits_used > threshold |
+| **基线对比** | 用户历史平均值 vs 当前窗口值 | current / avg_7d > N倍 |
+| **突变检测** | 相邻时间窗口消耗差值 | delta > absolute_threshold |
+| **速率计算** | requests_per_minute 指标 | RPM > plan_limit × safety_factor |
+
+```mermaid
+graph LR
+    subgraph 时间窗口检测
+        W1[5min窗口] --> AGG1[累计credits]
+        W2[30min窗口] --> AGG2[累计credits]
+        W3[1h窗口] --> AGG3[累计credits]
+        W4[24h窗口] --> AGG4[累计credits]
+    end
+    
+    AGG1 --> CMP{超过阈值?}
+    AGG2 --> CMP
+    AGG3 --> CMP
+    AGG4 --> CMP
+    
+    CMP -->|是| SCORE[风险分数+1]
+    CMP -->|否| OK[正常]
+```
+
+#### 规则2：会话模式检测
+
+| 技术 | 实现方式 | 异常信号 |
+|------|----------|----------|
+| **对话聚合统计** | GROUP BY conversation_id → COUNT(requests) | 大量 count=1 的对话 |
+| **对话密度** | conversations_created / hour | 远超正常 IDE 使用频率 |
+| **会话时长分布** | 对话首末请求的时间差 | 所有对话时长=0（瞬时对话） |
+| **消息深度比** | avg(messages_per_conversation) | 接近1.0表示自动化 |
+
+```mermaid
+graph TD
+    DATA[所有对话记录] --> AGG[按conversation_id分组]
+    AGG --> METRIC1["对话数/小时"]
+    AGG --> METRIC2["平均消息数/对话"]
+    AGG --> METRIC3["对话时长分布"]
+    
+    METRIC1 -->|> 20对话/h| FLAG1[异常]
+    METRIC2 -->|< 2消息/对话| FLAG2[异常]
+    METRIC3 -->|95%对话时长<1s| FLAG3[异常]
+    
+    FLAG1 --> SCORE[综合风险分数]
+    FLAG2 --> SCORE
+    FLAG3 --> SCORE
+```
+
+#### 规则3：IP/网络检测
+
+| 技术 | 实现方式 | 异常信号 |
+|------|----------|----------|
+| **IP信誉库** | 查询 MaxMind/IPinfo 数据库 | 数据中心/VPN/代理 ASN |
+| **IP多样性** | 同一账号 distinct IP count / day | 短时间多IP切换 |
+| **IP聚合** | 同一IP下的不同账号数量 | 多账号共用一个IP |
+| **地理一致性** | IP地理位置 vs 账号注册地 | 突然跨洲使用 |
+| **TLS指纹** | JA3/JA4 指纹 | Python httpx vs 真实浏览器/Node |
+
+```mermaid
+graph TD
+    REQ[请求到达] --> IP_CHECK[IP信誉查询]
+    REQ --> TLS[TLS指纹提取]
+    REQ --> GEO[地理定位]
+    
+    IP_CHECK -->|数据中心ASN| RISK_HIGH[高风险]
+    IP_CHECK -->|住宅IP| RISK_LOW[低风险]
+    
+    TLS -->|JA3匹配Python/httpx| RISK_MED[中风险 - 非IDE客户端]
+    TLS -->|JA3匹配Node.js| RISK_LOW2[低风险]
+    
+    GEO --> HISTORY{与历史位置一致?}
+    HISTORY -->|否| RISK_MED2[中风险]
+    HISTORY -->|是| RISK_LOW3[低风险]
+```
+
+### 8.3 综合评分机制（推测）
+
+```mermaid
+flowchart TD
+    R1_SCORE["规则1分数 (0-100)"] --> WEIGHT1["× 权重 0.4"]
+    R2_SCORE["规则2分数 (0-100)"] --> WEIGHT2["× 权重 0.3"]
+    R3_SCORE["规则3分数 (0-100)"] --> WEIGHT3["× 权重 0.3"]
+    
+    WEIGHT1 --> SUM[加权总分]
+    WEIGHT2 --> SUM
+    WEIGHT3 --> SUM
+    
+    SUM --> T1{总分 > 80?}
+    T1 -->|是| AUTO_SUSPEND[自动暂停账号]
+    T1 -->|否| T2{总分 > 50?}
+    T2 -->|是| REVIEW[人工审核队列]
+    T2 -->|否| PASS[通过 - 正常使用]
+```
+
+### 8.4 额外可能的检测维度
+
+| 维度 | 说明 | 该项目暴露程度 |
+|------|------|----------------|
+| **TLS 指纹 (JA3/JA4)** | Python httpx 的 TLS 握手特征与 Electron/Node 不同 | 🟠 中 |
+| **HTTP/2 行为** | 请求流的多路复用模式与真实 IDE 不同 | 🟡 低 |
+| **请求时间分布** | 7×24h均匀分布 vs 人类作息规律 | 🟠 中（服务器24h运行） |
+| **响应消费模式** | 流式响应是否被完整读取/中途断开频率 | 🟡 低 |
+| **API 调用模式** | 是否调用 /ListAvailableModels、频率是否异常 | 🟡 低 |
+
+---
+
+## 9. 总结与风险评估
+
+### 整体风险等级
+
+```mermaid
+pie title 风险分布
+    "高风险命中点" : 3
+    "中风险命中点" : 3
+    "低风险命中点" : 3
+```
+
+### 结论
+
+该项目的设计目标（代理网关 + 多账号 + VPN支持）与 Kiro 欺诈检测系统的检测目标
+存在**结构性冲突**。项目的核心功能特征恰好是检测系统重点监控的行为模式。
+
+**对使用者的风险告知：**
+
+| 使用方式 | 被检测概率 | 说明 |
+|----------|-----------|------|
+| 单账号 + 住宅IP + 低频使用 | 🟢 低 | 接近正常 IDE 行为 |
+| 单账号 + VPN + 中频使用 | 🟠 中 | IP 信号可能触发审核 |
+| 多账号 + VPN + 高频使用 | 🔴 极高 | 几乎必然触发三条规则 |
+
+---
+
+> **文档更新时间**：2026-05-28  
+> **分析版本**：v2.4.dev.13  
+> **性质**：纯风险识别 + 检测原理分析（不含规避方案）
