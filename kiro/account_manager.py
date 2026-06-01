@@ -93,6 +93,28 @@ def _is_runtime_endpoint(auth_manager: KiroAuthManager) -> bool:
     return "://runtime." in auth_manager.api_host
 
 
+def _should_use_static_models(auth_manager: KiroAuthManager) -> bool:
+    """
+    Decide whether to skip the /ListAvailableModels call and use static models.
+
+    Returns True when:
+    - The runtime endpoint is used (does not provide /ListAvailableModels), OR
+    - Authentication is via an API key. Verified behavior: API keys (ksk_) return
+      403 on /ListAvailableModels (they are identity/session credentials whose
+      model access is gated by the assigned profile), so calling it just wastes
+      retries. Static fallback models are used instead.
+
+    Args:
+        auth_manager: KiroAuthManager instance
+
+    Returns:
+        True if static fallback models should be used, False to fetch dynamically.
+    """
+    if auth_manager.auth_type == AuthType.API_KEY:
+        return True
+    return _is_runtime_endpoint(auth_manager)
+
+
 def _format_duration(seconds: float) -> str:
     """
     Format duration in human-readable format.
@@ -514,6 +536,13 @@ class AccountManager:
                     api_region=creds_config.get("api_region")
                 )
             elif cred_type == "api_key":
+                if not creds_config.get("profile_arn"):
+                    logger.warning(
+                        f"API-key account {account_id} has no 'profile_arn' configured. "
+                        f"Will attempt auto-discovery via ListAvailableProfiles, which "
+                        f"typically returns empty for 'ksk_' session keys. If initialization "
+                        f"fails, set 'profile_arn' explicitly for this account."
+                    )
                 auth_manager = KiroAuthManager(
                     api_key=creds_config.get("api_key"),
                     profile_arn=creds_config.get("profile_arn"),
@@ -528,10 +557,10 @@ class AccountManager:
             token = await auth_manager.get_access_token()
             
             # Determine if we should fetch models or use static list
-            if _is_runtime_endpoint(auth_manager):
-                # New runtime endpoint does not provide /ListAvailableModels (AWS limitation)
-                # Use static list without attempting request
-                logger.debug(f"Account {account_id}: Using static model list for runtime.kiro.dev endpoint")
+            if _should_use_static_models(auth_manager):
+                # Runtime endpoint (no /ListAvailableModels) or API-key auth
+                # (returns 403 on /ListAvailableModels). Use static list.
+                logger.debug(f"Account {account_id}: Using static model list (endpoint/auth does not support ListAvailableModels)")
                 models_list = FALLBACK_MODELS
             else:
                 # Old endpoint - attempt to fetch dynamic model list
@@ -619,11 +648,11 @@ class AccountManager:
         if not account or not account.auth_manager:
             return
         
-        # Check if using runtime endpoint (no dynamic model list available)
-        if _is_runtime_endpoint(account.auth_manager):
-            # Runtime endpoint does not provide /ListAvailableModels
+        # Check if using runtime endpoint or API-key auth (no dynamic model list)
+        if _should_use_static_models(account.auth_manager):
+            # Runtime endpoint or API-key auth does not provide /ListAvailableModels
             # Use static list and update cache timestamp
-            logger.debug(f"Account {account_id}: Skipping model refresh for runtime.kiro.dev endpoint (using static list)")
+            logger.debug(f"Account {account_id}: Skipping model refresh (using static list)")
             await account.model_cache.update(FALLBACK_MODELS)
             account.models_cached_at = time.time()
             self._dirty = True

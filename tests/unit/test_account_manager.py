@@ -1411,3 +1411,85 @@ class TestAccountManagerApiKeyType:
 
         assert len(manager._accounts) == 2
         assert any(aid.startswith("api_key_") for aid in manager._accounts)
+
+
+
+class TestShouldUseStaticModels:
+    """
+    Tests for _should_use_static_models(): API keys and runtime endpoints must
+    skip the /ListAvailableModels call (API keys return 403 on it).
+    """
+
+    def test_api_key_auth_uses_static_models(self):
+        """
+        What it does: API_KEY auth -> use static models (skip ListAvailableModels).
+        Purpose: Verified ksk_ keys 403 on ListAvailableModels; avoid wasted retries.
+        """
+        from kiro.account_manager import _should_use_static_models
+        from kiro.auth import KiroAuthManager
+
+        mgr = KiroAuthManager(api_key="ksk_static_models_test")
+        assert _should_use_static_models(mgr) is True
+
+    def test_runtime_endpoint_uses_static_models(self):
+        """
+        What it does: runtime.kiro.dev endpoint -> static models.
+        Purpose: Preserve existing runtime-endpoint behavior.
+        """
+        from kiro.account_manager import _should_use_static_models
+        from unittest.mock import MagicMock
+        from kiro.auth import AuthType
+
+        mgr = MagicMock()
+        mgr.auth_type = AuthType.KIRO_DESKTOP
+        mgr.api_host = "https://runtime.us-east-1.kiro.dev"
+        assert _should_use_static_models(mgr) is True
+
+    def test_q_endpoint_non_apikey_fetches_dynamically(self):
+        """
+        What it does: q.amazonaws.com + non-API-key -> dynamic fetch (not static).
+        Purpose: Ensure we don't over-broaden the static-model path.
+        """
+        from kiro.account_manager import _should_use_static_models
+        from unittest.mock import MagicMock
+        from kiro.auth import AuthType
+
+        mgr = MagicMock()
+        mgr.auth_type = AuthType.AWS_SSO_OIDC
+        mgr.api_host = "https://q.us-east-1.amazonaws.com"
+        assert _should_use_static_models(mgr) is False
+
+
+class TestAccountManagerApiKeyInitialization:
+    """
+    Tests for initializing an API-key account end-to-end (with explicit profile_arn),
+    verifying it skips ListAvailableModels and uses fallback models.
+    """
+
+    @pytest.mark.asyncio
+    async def test_api_key_account_init_with_explicit_profile_arn(self, tmp_path):
+        """
+        What it does: Initializes an api_key account that has an explicit profile_arn.
+        Purpose: Verify the primary working path - no discovery call, static models,
+                 no ListAvailableModels call (which would 403).
+        """
+        creds = [{
+            "type": "api_key",
+            "api_key": "ksk_init_test_key",
+            "profile_arn": "arn:aws:codewhisperer:us-east-1:111:profile/explicit",
+        }]
+        creds_file = tmp_path / "credentials.json"
+        creds_file.write_text(json.dumps(creds))
+        state_file = tmp_path / "state.json"
+
+        manager = AccountManager(str(creds_file), str(state_file))
+        await manager.load_credentials()
+
+        account_id = list(manager._accounts.keys())[0]
+        ok = await manager._initialize_account(account_id)
+
+        assert ok is True
+        account = manager._accounts[account_id]
+        # Profile arn taken from config; static (fallback) models loaded
+        assert account.auth_manager.profile_arn == "arn:aws:codewhisperer:us-east-1:111:profile/explicit"
+        assert len(account.model_resolver.get_available_models()) > 0

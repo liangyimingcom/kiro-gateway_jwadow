@@ -785,10 +785,14 @@ class KiroAuthManager:
         profiles = data.get("profiles") or []
         if not profiles:
             raise ValueError(
-                "API key authenticated, but no profiles are available for it. "
-                "Ensure the API key's account has an active Kiro subscription "
-                "(Pro/Pro+/Power) and a provisioned profile. "
-                "You may also set PROFILE_ARN explicitly to bypass discovery."
+                "API key authenticated successfully, but ListAvailableProfiles returned "
+                "no profiles. Verified behavior: 'ksk_' keys are identity/session "
+                "credentials whose model access is gated by an assigned profile; many "
+                "keys (e.g. those created on the Kiro website without a provisioned "
+                "subscription profile) have no auto-discoverable profile. "
+                "Set 'profile_arn' explicitly for this API-key account (in credentials.json) "
+                "or PROFILE_ARN in .env to use it. "
+                "See docs/zh/API_KEY_AUTH_POC_RESULT.md for details."
             )
 
         arn = profiles[0].get("arn")

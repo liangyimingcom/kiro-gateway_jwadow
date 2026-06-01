@@ -1,690 +1,244 @@
-# 新增凭证来源调研：Authenticate with an API key
+# 新增凭证来源方案：Authenticate with an API key
 
-> **任务性质**：功能可行性调研 + 集成方案设计（不含代码改动，仅设计）
-> **目标版本**：v2.4.dev.13
-> **最后更新**：2026-05-28
+> 版本：v2.4.dev.13 | 最后更新：2026-06-01
+> 状态：✅ 已实现并测试（全量 1719 测试通过，零回归）
 
----
-
-## 1. 需求背景与目标
-
-### 1.1 需求
-
-为 Kiro Gateway 的**认证管理**模块新增第 5 种凭证来源：
-**API Key 认证（`KIRO_API_KEY`）**，并满足：
-
-1. 与现有 4 种认证方式（JSON / refresh_token / SQLite / AWS SSO OIDC）**完全兼容**
-2. 与**多账号管理系统**无缝融合 —— 每个 API Key 视为一个独立账号
-3. **不影响**任何现有功能（零破坏性变更）
-
-### 1.2 核心设计理念
-
-```mermaid
-mindmap
-  root((API Key<br/>认证集成))
-    兼容性
-      不改动现有4种认证
-      新增独立分支
-      默认行为不变
-    融合度
-      每个APIKey=1个账号
-      复用Circuit Breaker
-      复用故障切换
-    简化性
-      无需Token刷新
-      无会话过期
-      无浏览器登录
-    安全性
-      不记录Key明文
-      复用现有脱敏
-```
-
+为 Kiro Gateway 的认证管理新增第 5 种凭证来源 **API Key 认证（`type=api_key`）**，
+与现有 4 种方式（JSON / refresh_token / SQLite / AWS SSO OIDC）共存，并融入多账号系统
+（每个 API Key = 一个账号）。
 
 ---
 
-## 2. Kiro API Key 认证机制调研
+## 1. 需求
 
-> 基于 Kiro 官方文档与公开资料整理。内容已按授权许可要求改写。
-
-### 2.1 关键事实
-
-| 维度 | 说明 | 来源 |
-|------|------|------|
-| 触发方式 | 设置 `KIRO_API_KEY` 环境变量，CLI 跳过浏览器登录 | [headless mode 博客](https://kiro.dev/blog/introducing-headless-mode/) |
-| 可用范围 | Kiro Pro / Pro+ / Power 订阅；企业版需管理员启用 | [headless 文档](https://kiro.dev/docs/cli/headless/) |
-| 签发来源 | Kiro 门户 / 控制台（Settings → 启用 API Key 生成） | [API keys 治理文档](https://kiro.dev/docs/enterprise/governance/api-keys/) |
-| 生命周期 | 长期有效，无会话过期，无需刷新 | [classmethod 实测](https://dev.classmethod.jp/en/articles/kiro-cli-2-0-headless-mode-api-key-auth/) |
-| 使用场景 | Headless / 非交互式 / CI/CD 自动化 | [CLI 2.0 changelog](https://kiro.dev/changelog/cli/2-0/) |
-
-### 2.2 与现有认证方式的本质区别
-
-```mermaid
-flowchart TD
-    subgraph 现有方式_需要刷新
-        A1["refresh_token / SQLite / JSON"]
-        A1 --> A2["access_token (短期, ~1h)"]
-        A2 --> A3["过期前刷新"]
-        A3 --> A2
-    end
-
-    subgraph API_Key方式_无需刷新
-        B1["KIRO_API_KEY (长期凭证)"]
-        B1 --> B2["直接作为认证凭证"]
-        B2 --> B3["无过期, 无刷新"]
-    end
-```
-
-**核心差异**：现有方式都是"用 refresh_token 换取短期 access_token 并定期刷新"，
-而 API Key 是**长期静态凭证**，认证模型大幅简化。
-
-### 2.3 传输协议（已通过 POC 实测验证 ✅）
-
-> 本节原为"待验证"，现已在 POC 阶段通过**官方 Kiro CLI 二进制分析 + 真实端点黑盒探测**得到确认。
-> 详细验证过程见 [`API_KEY_AUTH_POC_RESULT.md`](API_KEY_AUTH_POC_RESULT.md)。
-
-#### 验证结论
-
-| 维度 | 验证结果 |
-|------|----------|
-| Key 传输方式 | ✅ **直接作为 `Authorization: Bearer {ksk_key}`**（无需 exchange） |
-| 目标端点 | ✅ **`q.{region}.amazonaws.com`**（AWS CodeWhisperer/Q 服务），**非** `runtime.kiro.dev` |
-| profileArn | ✅ **仍需提供**，但可通过 `ListAvailableProfiles` **自动发现** |
-| 区域处理 | ✅ 沿用现有 region 逻辑（默认 us-east-1，可 override） |
-
-#### 关键证据
-
-```mermaid
-flowchart TD
-    K["ksk_ API Key"] --> EP{发往哪个端点?}
-    EP -->|"runtime.kiro.dev (IDE/desktop)"| R403["❌ 403 bearer token invalid"]
-    EP -->|"q.{region}.amazonaws.com (CodeWhisperer/Q)"| R200["✅ 接受 (无鉴权头→400 Missing bearer)"]
-
-    R200 --> LP["ListAvailableProfiles<br/>(x-amz-target, x-amz-json-1.0)"]
-    LP --> ARN["获取 profileArn"]
-    ARN --> GEN["generateAssistantResponse<br/>Bearer ksk_ + profileArn"]
-
-    style R403 fill:#ff6b6b
-    style R200 fill:#90EE90
-```
-
-**验证来源**：
-1. 官方 `kiro-cli` 二进制中存在 `api_client::profile::discover_endpoint_for_api_key`、
-   `GetProfile succeeded for API key`、`lazy resolution via list_available_profiles`、
-   `httpBearerAuth`、`x-amz-target: AmazonCodeWhispererService.ListAvailableProfiles`。
-2. 真实端点探测：`q.us-east-1.amazonaws.com` 在无 Authorization 头时返回
-   `400 Missing bearer token`，带 `ksk_` Bearer 时被接受（`ListAvailableProfiles → 200`）；
-   而 `runtime.kiro.dev` 对同一 Key 返回 `403 bearer token invalid`。
-
-> ⚠️ **此前推测中的"exchange 端点"假设已被推翻**：无需任何 token 交换步骤，
-> `ksk_` 本身就是 Bearer 凭证，只是必须发往 CodeWhisperer/Q 服务端点。
->
-> 注：相关外部信息已按授权许可改写。
-
+| 项 | 说明 |
+|----|------|
+| 目标 | 支持 Kiro 门户签发的 API Key（前缀 `ksk_`，用于 Kiro CLI headless 模式） |
+| 兼容 | 不影响现有 4 种认证方式（纯增量变更） |
+| 融合 | 每个 API Key 作为一个独立账号，复用故障切换 / Circuit Breaker / Sticky |
 
 ---
 
-## 3. 现有认证架构分析
+## 2. API Key 认证协议（已验证）
 
-### 3.1 认证体系的两层结构
+> 通过**官方 Kiro CLI 二进制分析** + **真实端点探测**确定。外部信息已按授权许可改写。
+
+### 2.1 协议要点
+
+| 维度 | 结论 |
+|------|------|
+| 传输方式 | API Key 直接作为 `Authorization: Bearer {ksk_key}`（**无需 token 交换**） |
+| 目标端点 | **`q.{region}.amazonaws.com`**（AWS CodeWhisperer/Q 服务），**非** `runtime.kiro.dev` |
+| 协议格式 | AWS Coral RPC：`Content-Type: application/x-amz-json-1.0` + `x-amz-target` |
+| profileArn | **需显式提供**；`ListAvailableProfiles` 对 `ksk_` 会话密钥返回空列表 |
+| 模型列表 | API Key 在 `ListAvailableModels` 上返回 403 → 跳过，使用静态 fallback 模型 |
+| 过期 | API Key 长期有效，无需刷新 |
+
+
+### 2.2 关键特性：`ksk_` 是"身份/会话密钥"
+
+`ksk_` API Key 能通过认证（"我是谁"），但其模型访问权限由**分配的 profile** 门控：
 
 ```mermaid
 flowchart TD
-    subgraph 账号编排层
-        AM["AccountManager<br/>(account_manager.py)"]
-        AM --> LC["load_credentials()<br/>解析 credentials.json"]
-        AM --> IA["_initialize_account()<br/>按 type 构造认证管理器"]
-    end
+    K["ksk_ API Key"] --> AUTH{发往 q.region.amazonaws.com}
+    AUTH -->|无 Authorization 头| E400["400 Missing bearer token"]
+    AUTH -->|带 Bearer ksk_| OK["✅ 认证通过 (200)"]
 
-    subgraph 认证执行层
-        KAM["KiroAuthManager<br/>(auth.py)"]
-        KAM --> DT["_detect_auth_type()<br/>判定 KIRO_DESKTOP / AWS_SSO_OIDC"]
-        KAM --> GAT["get_access_token()<br/>返回有效token,必要时刷新"]
-        KAM --> FR["force_refresh()<br/>403时强制刷新"]
-    end
+    OK --> LP["ListAvailableProfiles"]
+    OK --> LM["ListAvailableModels"]
+    LP -->|未绑定订阅 profile| EMPTY["返回空列表 []"]
+    LM -->|权限门控| F403["403"]
 
-    IA -->|创建实例| KAM
+    EMPTY --> NEED["⇒ 必须显式提供 profile_arn"]
+    F403 --> STATIC["⇒ 跳过, 使用静态 fallback 模型"]
+
+    style OK fill:#90EE90
+    style NEED fill:#FFE4B5
+    style STATIC fill:#FFE4B5
 ```
 
-### 3.2 现有凭证类型 → 认证管理器映射
+**设计取舍**：因 `ListAvailableProfiles` 对会话密钥返回空，**显式 `profile_arn` 是主路径**；
+自动发现仅作 best-effort（账号若已开通 profile 则自动生效）。
 
-`_initialize_account()` 中的分发逻辑（auth.py 现状）：
-
-| credentials.json `type` | 构造参数 | AuthType |
-|------------------------|----------|----------|
-| `json` | `creds_file=path` | 自动检测 |
-| `sqlite` | `sqlite_db=path` | 通常 AWS_SSO_OIDC |
-| `refresh_token` | `refresh_token=...` | KIRO_DESKTOP |
-
-```mermaid
-flowchart LR
-    ENTRY["credentials.json 条目"] --> TYPE{type?}
-    TYPE -->|json| J["KiroAuthManager(creds_file=...)"]
-    TYPE -->|sqlite| S["KiroAuthManager(sqlite_db=...)"]
-    TYPE -->|refresh_token| R["KiroAuthManager(refresh_token=...)"]
-    TYPE -->|"❓ api_key (新增)"| NEW["KiroAuthManager(api_key=...)"]
-
-    J --> VERIFY["get_access_token() 验证"]
-    S --> VERIFY
-    R --> VERIFY
-    NEW --> VERIFY
-
-    style NEW fill:#90EE90
-```
-
-### 3.3 关键调用链路（请求时）
+### 2.3 请求时序
 
 ```mermaid
 sequenceDiagram
-    participant Route as routes_*.py
-    participant AM as AccountManager
-    participant KAM as KiroAuthManager
-    participant Utils as utils.get_kiro_headers
-    participant HTTP as KiroHttpClient
-    participant Kiro as Kiro API
+    participant GW as Kiro Gateway
+    participant Q as q.region.amazonaws.com
 
-    Route->>AM: get_next_account(model)
-    AM->>KAM: get_access_token()
-    KAM-->>AM: token
-    Route->>Utils: get_kiro_headers(auth_manager, token)
-    Utils-->>Route: {Authorization: Bearer token, ...}
-    Route->>HTTP: POST /generateAssistantResponse
-    HTTP->>Kiro: 发送请求
-    Kiro-->>HTTP: 响应 (403→force_refresh)
-```
-
-**关键观察**：整个上层（路由、HTTP客户端、headers构造）只依赖
-`KiroAuthManager` 的**统一接口**（`get_access_token()` / `force_refresh()` / 属性）。
-这意味着只要新认证方式**实现相同接口**，上层代码**完全无需改动**。
-
-
----
-
-## 4. 可行性分析
-
-### 4.1 结论：✅ 高度可行
-
-API Key 认证天然契合现有架构，原因如下：
-
-```mermaid
-flowchart TD
-    Q1{现有架构是否有<br/>统一认证接口?} -->|是: KiroAuthManager| OK1[✅ 新方式实现同接口即可]
-    Q2{多账号是否支持<br/>异构凭证类型?} -->|是: type分发| OK2[✅ 新增type分支即可]
-    Q3{API Key是否比现有<br/>方式更复杂?} -->|否: 无需刷新更简单| OK3[✅ 是现有逻辑的子集]
-    Q4{是否需要改动<br/>上层调用?} -->|否: 接口不变| OK4[✅ 路由/HTTP/headers零改动]
-
-    OK1 --> CONCLUSION[整体可行性: 高]
-    OK2 --> CONCLUSION
-    OK3 --> CONCLUSION
-    OK4 --> CONCLUSION
-
-    style CONCLUSION fill:#90EE90
-```
-
-### 4.2 复杂度评估
-
-| 评估维度 | 评级 | 说明 |
-|----------|------|------|
-| 实现复杂度 | 🟢 低 | API Key 无刷新逻辑，是现有逻辑的简化子集 |
-| 改动范围 | 🟢 小 | 集中在 `auth.py` + `account_manager.py` |
-| 破坏性风险 | 🟢 极低 | 纯新增分支，不修改现有路径 |
-| 测试成本 | 🟠 中 | 需覆盖单账号/多账号/混合场景 |
-| 不确定性 | 🟢 低 | API Key 传输协议已实测验证（§2.3），无遗留未知 |
-
-### 4.3 与多账号系统的融合度分析
-
-**每个 API Key = 一个账号** 的映射非常自然：
-
-```mermaid
-flowchart TD
-    subgraph credentials.json
-        K1["{type:api_key, api_key:kiro_xxx1}"]
-        K2["{type:api_key, api_key:kiro_xxx2}"]
-        K3["{type:json, path:...}"]
+    Note over GW: profile_arn 已配置?
+    alt 显式提供 (推荐)
+        GW->>GW: 直接使用 profile_arn
+    else 未提供 (best-effort)
+        GW->>Q: ListAvailableProfiles (Bearer ksk_)
+        Q-->>GW: profiles[] (会话密钥多为空→报错提示配置 profile_arn)
     end
-
-    K1 --> ACC1["账号1 (api_key_hash1)"]
-    K2 --> ACC2["账号2 (api_key_hash2)"]
-    K3 --> ACC3["账号3 (path)"]
-
-    ACC1 --> POOL["统一账号池"]
-    ACC2 --> POOL
-    ACC3 --> POOL
-
-    POOL --> CB["Circuit Breaker 故障切换"]
-    POOL --> STICKY["Sticky 粘滞策略"]
-    POOL --> STATS["统计与冷却"]
-
-    style ACC1 fill:#90EE90
-    style ACC2 fill:#90EE90
-```
-
-**融合优势**：
-- API Key 账号与其他类型账号**混合编排**，可同时使用
-- 自动继承故障切换：某个 Key 被限流(429)/配额耗尽(402) → 切换下一个
-- account_id 用 `api_key_{sha256[:16]}` 生成，与 `refresh_token` 类型一致
-
-
----
-
-## 5. 集成方案设计
-
-### 5.1 总体改动地图
-
-```mermaid
-flowchart TD
-    subgraph 需改动_新增分支
-        C1["config.py<br/>+ KIRO_API_KEY 环境变量<br/>+ API Key 端点模板(如需)"]
-        C2["auth.py<br/>+ AuthType.API_KEY<br/>+ api_key 参数<br/>+ 简化的 get_access_token 分支"]
-        C3["account_manager.py<br/>+ type=api_key 处理<br/>+ _initialize_account 分支"]
-    end
-
-    subgraph 可能微调
-        C4["utils.py<br/>get_kiro_headers (如传输方式不同)"]
-        C5["main.py<br/>.env→credentials.json 迁移逻辑"]
-        C6["credentials.json.example<br/>+ api_key 示例"]
-    end
-
-    subgraph 零改动_自动兼容
-        C7["routes_*.py"]
-        C8["http_client.py"]
-        C9["converters_*.py / streaming_*.py"]
-    end
-
-    style C1 fill:#FFE4B5
-    style C2 fill:#FFE4B5
-    style C3 fill:#FFE4B5
-    style C4 fill:#FFF8DC
-    style C5 fill:#FFF8DC
-    style C6 fill:#FFF8DC
-    style C7 fill:#90EE90
-    style C8 fill:#90EE90
-    style C9 fill:#90EE90
-```
-
-### 5.2 认证类型扩展设计
-
-```mermaid
-classDiagram
-    class AuthType {
-        <<enum>>
-        KIRO_DESKTOP
-        AWS_SSO_OIDC
-        API_KEY  ⭐新增
-    }
-
-    class KiroAuthManager {
-        -_api_key: Optional[str]  ⭐新增
-        -_auth_type: AuthType
-        +__init__(... api_key=None)  ⭐扩展
-        +get_access_token() str
-        +force_refresh() str
-        +is_token_expiring_soon() bool
-        +auth_type AuthType
-    }
-
-    KiroAuthManager --> AuthType
-```
-
-### 5.3 认证类型检测逻辑扩展
-
-```mermaid
-flowchart TD
-    INIT["KiroAuthManager.__init__"] --> CHECK1{api_key 已提供?}
-    CHECK1 -->|是| API_KEY["auth_type = API_KEY"]
-    CHECK1 -->|否| CHECK2{client_id + client_secret?}
-    CHECK2 -->|是| OIDC["auth_type = AWS_SSO_OIDC"]
-    CHECK2 -->|否| DESKTOP["auth_type = KIRO_DESKTOP"]
-
-    style API_KEY fill:#90EE90
-```
-
-> **优先级**：`api_key` 检测应放在**最前面**，确保显式提供 Key 时优先采用。
-
-### 5.4 get_access_token() 的 API Key 分支（已按验证结论定稿）
-
-```mermaid
-flowchart TD
-    GET["get_access_token()"] --> TYPE{auth_type?}
-    TYPE -->|API_KEY| HAVE{profileArn 已知?}
-    HAVE -->|否| DISC["_discover_profile_arn()<br/>ListAvailableProfiles @ q.{region}.amazonaws.com"]
-    HAVE -->|是| RETKEY
-    DISC --> RETKEY["直接返回 api_key 作为 Bearer<br/>(无 exchange, 无过期)"]
-    TYPE -->|其他| EXISTING["现有逻辑:<br/>检查过期→刷新→返回"]
-
-    RETKEY --> RET["返回凭证"]
-    EXISTING --> RET
-
-    style RETKEY fill:#90EE90
-    style DISC fill:#90EE90
-```
-
-**已验证的实现（非弹性二选一）**：
-- `get_access_token()` **直接返回 `self._api_key`**（API Key 即 Bearer token，无交换）
-- 首次调用时若 `profileArn` 未知，则通过 `ListAvailableProfiles` 自动发现并缓存
-- API_KEY 认证的 `api_host`/`q_host` 被覆盖为 `q.{region}.amazonaws.com`
-
-### 5.5 is_token_expiring_soon() 行为
-
-```mermaid
-flowchart LR
-    CHECK["is_token_expiring_soon()"] --> TYPE{API_KEY?}
-    TYPE -->|是| FALSE["返回 False<br/>(API Key 永不过期)"]
-    TYPE -->|否| EXISTING["现有逻辑"]
-
-    style FALSE fill:#90EE90
+    GW->>Q: generateAssistantResponse<br/>Bearer ksk_ + profileArn
+    Q-->>GW: SSE 流
 ```
 
 
 ---
 
-## 6. 详细实现设计（按模块）
+## 3. 架构集成
 
-> 以下为**设计示意**（伪代码/片段），用于说明改动点，非最终代码。
+### 3.1 集成位置
 
-### 6.1 `config.py`
+```mermaid
+flowchart TD
+    subgraph 配置
+        ENV[".env: KIRO_API_KEY + PROFILE_ARN"]
+        JSON["credentials.json: {type:api_key, api_key, profile_arn}"]
+    end
+    ENV -->|main.py 迁移| JSON
+    JSON --> AM[AccountManager.load_credentials]
+    AM -->|"account_id = api_key_{sha256[:16]}"| ACC[Account]
+    ACC --> INIT[_initialize_account]
+    INIT --> KAM["KiroAuthManager(api_key=...)"]
+    KAM --> DT[_detect_auth_type → API_KEY]
+    DT --> HOST["api_host/q_host 覆盖为 q.region.amazonaws.com"]
+
+    ACC --> POOL[统一账号池]
+    POOL --> CB[Circuit Breaker]
+    POOL --> STICKY[Sticky]
+    POOL --> FAIL["失效切换 (403/402/429)"]
+
+    style DT fill:#90EE90
+    style HOST fill:#90EE90
+```
+
+### 3.2 认证类型检测（API_KEY 最高优先级）
+
+```mermaid
+flowchart TD
+    INIT[KiroAuthManager.__init__] --> C1{api_key 提供?}
+    C1 -->|是| AK[auth_type = API_KEY]
+    C1 -->|否| C2{clientId + clientSecret?}
+    C2 -->|是| OIDC[AWS_SSO_OIDC]
+    C2 -->|否| DESK[KIRO_DESKTOP]
+    style AK fill:#90EE90
+```
+
+### 3.3 多账号融合（每个 Key = 一个账号）
+
+- `account_id` 用 `api_key_{sha256(key)[:16]}` 生成（哈希，不存原始 key）
+- API Key 账号与 JSON/SQLite/refresh_token 账号**混合编排**
+- 自动继承故障切换：某 Key 被限流/失效 → 切换下一个账号
+
+
+---
+
+## 4. 实现设计（与代码一一对应）
+
+### 4.1 `kiro/config.py`
 
 ```python
-# 新增：API Key 环境变量（用于 .env 单账号场景）
 KIRO_API_KEY: str = os.getenv("KIRO_API_KEY", "")
 
-# API Key 服务端点（已验证）：直传 Bearer 到 q.{region}.amazonaws.com
+# API Key 直传 Bearer 的服务端点（q.{region}.amazonaws.com）
 KIRO_API_KEY_SERVICE_HOST_TEMPLATE: str = os.getenv(
     "KIRO_API_KEY_SERVICE_URL", "https://q.{region}.amazonaws.com"
 )
+def get_kiro_api_key_service_host(region: str) -> str:
+    return KIRO_API_KEY_SERVICE_HOST_TEMPLATE.format(region=region)
 ```
 
-### 6.2 `auth.py`
+### 4.2 `kiro/auth.py`
 
 ```python
 class AuthType(Enum):
     KIRO_DESKTOP = "kiro_desktop"
     AWS_SSO_OIDC = "aws_sso_oidc"
-    API_KEY = "api_key"          # 新增
+    API_KEY = "api_key"                      # 新增
 
-class KiroAuthManager:
-    def __init__(self, ..., api_key: Optional[str] = None):
-        self._api_key = api_key
-        # ... 现有初始化 ...
+# __init__: 当 auth_type == API_KEY 时, 覆盖 host 为 q.{region}.amazonaws.com
+if self._auth_type == AuthType.API_KEY:
+    api_key_host = get_kiro_api_key_service_host(final_api_region)
+    self._api_host = api_key_host
+    self._q_host = api_key_host
 
-    def _detect_auth_type(self) -> None:
-        if self._api_key:                          # 新增分支(最高优先级)
-            self._auth_type = AuthType.API_KEY
-        elif self._client_id and self._client_secret:
-            self._auth_type = AuthType.AWS_SSO_OIDC
-        else:
-            self._auth_type = AuthType.KIRO_DESKTOP
+async def get_access_token(self) -> str:
+    if self._auth_type == AuthType.API_KEY:
+        if not self._profile_arn:            # best-effort 发现
+            async with self._lock:
+                if not self._profile_arn:
+                    await self._discover_profile_arn()  # ListAvailableProfiles
+        return self._api_key                  # Key 即 Bearer token
 
-    async def get_access_token(self) -> str:
-        if self._auth_type == AuthType.API_KEY:    # 已验证: 直传, 无 exchange
-            # API Key 本身就是 Bearer token; 首次调用懒发现 profileArn
-            if not self._profile_arn:
-                await self._discover_profile_arn()  # ListAvailableProfiles
-            return self._api_key
-        # ... 现有刷新逻辑保持不变 ...
-
-    async def _discover_profile_arn(self) -> None:
-        # POST q.{region}.amazonaws.com
-        #   Authorization: Bearer {api_key}
-        #   x-amz-target: AmazonCodeWhispererService.ListAvailableProfiles
-        #   Content-Type: application/x-amz-json-1.0
-        # 取 profiles[0].arn
-        ...
-
-    def is_token_expiring_soon(self) -> bool:
-        if self._auth_type == AuthType.API_KEY:
-            return False                            # API Key 永不过期
-        # ... 现有逻辑 ...
+def is_token_expiring_soon(self) -> bool:
+    if self._auth_type == AuthType.API_KEY:
+        return False                          # 永不过期
 ```
 
-> 注：`__init__` 中当 `auth_type == API_KEY` 时，将 `api_host`/`q_host`
-> 覆盖为 `q.{region}.amazonaws.com`（CodeWhisperer/Q 服务端点）。
+- `_discover_profile_arn()`：`POST {q_host}` + `x-amz-target: AmazonCodeWhispererService.ListAvailableProfiles`，取 `profiles[0].arn`；空列表时抛出指引设置 `profile_arn` 的清晰错误。
+- `force_refresh()`：API_KEY 直接返回 key（无交换）。
+- `_redact_secret()`：日志仅显示前 8 位 + 长度。
 
-### 6.3 `account_manager.py`
-
-**load_credentials() 新增校验分支：**
+### 4.3 `kiro/account_manager.py`
 
 ```python
-# API Key 类型校验（类比 refresh_token）
-if cred_type == "api_key" and not entry.get("api_key"):
-    logger.warning(f"Invalid entry (type=api_key requires api_key field): {entry}")
-    continue
-
-if cred_type == "api_key":
-    key = entry.get("api_key", "")
-    key_hash = hashlib.sha256(key.encode()).hexdigest()[:16]
-    account_id = f"api_key_{key_hash}"          # 与 refresh_token 命名风格一致
-    self._accounts[account_id] = Account(id=account_id)
-    continue
+def _should_use_static_models(auth_manager) -> bool:
+    # API Key 在 ListAvailableModels 上 403 → 跳过, 用静态 fallback 模型
+    if auth_manager.auth_type == AuthType.API_KEY:
+        return True
+    return _is_runtime_endpoint(auth_manager)
 ```
 
-**_initialize_account() 新增构造分支：**
+- `load_credentials()`：新增 `type=api_key` 校验 + `account_id = api_key_{hash}`。
+- `_initialize_account()`：新增 api_key 构造分支；无 `profile_arn` 时记录警告。
 
-```python
-elif cred_type == "api_key":
-    auth_manager = KiroAuthManager(
-        api_key=creds_config.get("api_key"),
-        profile_arn=creds_config.get("profile_arn"),
-        region=creds_config.get("region", "us-east-1"),
-        api_region=creds_config.get("api_region")
-    )
-```
+### 4.4 `main.py`
 
-### 6.4 `main.py`（.env → credentials.json 迁移）
-
-在 lifespan 的迁移逻辑中，新增 API Key 来源（优先级可设为最高或可配置）：
-
-```python
-has_api_key = bool(KIRO_API_KEY)
-# ...
-if has_api_key:
-    entry = {"type": "api_key", "api_key": KIRO_API_KEY}
-    _add_env_overrides(entry)
-    credentials.append(entry)
-```
-
-### 6.5 `credentials.json.example`（新增示例）
-
-```json
-{
-  "type": "api_key",
-  "api_key": "kiro_xxxxxxxxxxxxxxxxxxxxxxxx",
-  "region": "us-east-1",
-  "comment": "API Key 认证 (Kiro Pro/Pro+/Power, 来自Kiro门户)"
-}
-```
+`.env` 中的 `KIRO_API_KEY` 以最高优先级迁移到 `credentials.json`；`validate_configuration()` 接受 API Key 作为合法凭证。
 
 
 ---
 
-## 7. 兼容性与影响分析
-
-### 7.1 对现有功能的影响评估
+## 5. 兼容性
 
 ```mermaid
-flowchart TD
-    subgraph 现有4种认证
-        E1[JSON文件]
-        E2[refresh_token]
-        E3[SQLite]
-        E4[AWS SSO OIDC]
-    end
-
-    NEW["新增 api_key 分支"] -.->|不修改| E1
-    NEW -.->|不修改| E2
-    NEW -.->|不修改| E3
-    NEW -.->|不修改| E4
-
-    NEW --> ADDITIVE["纯增量变更<br/>(Additive Change)"]
-    ADDITIVE --> SAFE["✅ 现有功能零影响"]
-
+flowchart LR
+    NEW["新增 api_key 分支"] -.->|不修改| E1[JSON]
+    NEW -.->|不修改| E2[refresh_token]
+    NEW -.->|不修改| E3[SQLite]
+    NEW -.->|不修改| E4[AWS SSO OIDC]
+    NEW --> SAFE["✅ 纯增量, 零回归"]
     style SAFE fill:#90EE90
 ```
 
-### 7.2 兼容性保障矩阵
+| 现有能力 | 影响 |
+|----------|------|
+| 4 种现有认证 | ❌ 不受影响（新增 `elif` 分支） |
+| 多账号故障切换 | ✅ 增强（API Key 纳入账号池） |
+| 错误分类 / 调试日志 | ✅ 复用（403/402/429 通用；headers 不入日志） |
 
-| 现有能力 | 是否受影响 | 保障措施 |
-|----------|-----------|----------|
-| JSON/SQLite/refresh_token 认证 | ❌ 不受影响 | 新增 `elif` 分支，不碰现有分支 |
-| Token 自动刷新 | ❌ 不受影响 | API_KEY 走独立分支 |
-| 403 force_refresh | ✅ 已适配 | API_KEY 模式下 force_refresh 直接返回 Key（无 exchange），失效则由失效切换处理 |
-| 多账号故障切换 | ✅ 增强 | API Key 账号自动纳入切换池 |
-| 单账号模式 | ❌ 不受影响 | API Key 单账号同样 bypass Circuit Breaker |
-| 错误分类(account_errors) | ✅ 复用 | 429/402/403 分类逻辑通用 |
-| 调试日志/脱敏 | ⚠️ 需注意 | 确保 api_key 不被明文记录 |
-
-### 7.3 force_refresh 的边界处理（已验证）
-
-```mermaid
-flowchart TD
-    F403["收到 403"] --> FR["force_refresh()"]
-    FR --> TYPE{auth_type?}
-    TYPE -->|API_KEY| HANDLE["无可刷新内容<br/>→ 直接返回 api_key<br/>(Key 即 Bearer, 无 exchange)"]
-    TYPE -->|其他| EXISTING["现有刷新逻辑"]
-
-    HANDLE --> CLASSIFY["若 Key 已失效, 后续仍 403<br/>account_errors 归类<br/>403=RECOVERABLE→切换账号"]
-
-    style HANDLE fill:#FFE4B5
-```
-
-**关键设计**：API Key 直传模式下若收到 403（Key 失效），无法刷新，应：
-1. 抛出清晰错误信息（提示 Key 可能失效）
-2. 多账号模式下，403 归类为 RECOVERABLE → 自动切换到下一个账号
-3. 单账号模式下，将原始错误返回给客户端
-
-### 7.4 安全注意事项
-
-| 风险点 | 防护措施 |
-|--------|----------|
-| API Key 明文泄露 | 日志中对 api_key 脱敏（仅显示前 8 位 + `...`） |
-| state.json 持久化 | account_id 用 hash，不存储原始 Key |
-| 调试日志 | debug_logger 不应记录 Authorization 头明文 |
-| credentials.json 权限 | 文档提示用户设置文件权限 600 |
-
+**安全**：API Key 仅脱敏入日志；`account_id` 为哈希；`state.json` 不存原始 key。
 
 ---
 
-## 8. 测试策略
+## 6. 测试策略
 
-> 遵循项目 AGENTS.md 的"偏执测试哲学"：覆盖边界、错误、双API、流式与非流式。
+| 层 | 覆盖 |
+|----|------|
+| 单元 | AuthType 检测优先级、host 路由到 q.amazonaws.com、永不过期、直传返回 key、profile 发现成功/空报错/已配置则跳过、force_refresh、脱敏、`_should_use_static_models`、config helper |
+| 单元 | account_manager：api_key 加载 / 确定性 ID / 缺字段跳过 / 多 key 独立 / 混合类型 / 显式 profile_arn 初始化 |
+| 集成 | 双 API Key 故障切换、单 API Key 加载 |
 
-### 8.1 测试覆盖矩阵
-
-```mermaid
-flowchart TD
-    subgraph 单元测试 tests/unit
-        T1["test_auth_manager.py<br/>+ API_KEY 类型检测"]
-        T2["test_auth_manager.py<br/>+ get_access_token(API_KEY)"]
-        T3["test_auth_manager.py<br/>+ is_token_expiring_soon=False"]
-        T4["test_account_manager.py<br/>+ type=api_key 加载"]
-        T5["test_account_manager.py<br/>+ account_id 生成"]
-        T6["test_config.py<br/>+ KIRO_API_KEY 读取"]
-    end
-
-    subgraph 集成测试 tests/integration
-        I1["test_account_system_flow.py<br/>+ 多API Key切换"]
-        I2["test_full_flow.py<br/>+ API Key端到端(OpenAI)"]
-        I3["test_full_flow.py<br/>+ API Key端到端(Anthropic)"]
-    end
-```
-
-### 8.2 关键测试用例
-
-| 用例 | 验证点 |
-|------|--------|
-| 仅 API Key 单账号 | 正常认证、无刷新调用、请求成功 |
-| 多个 API Key | 故障切换、Sticky、冷却 |
-| API Key + JSON 混合 | 异构账号共存编排 |
-| API Key 失效(403) | 多账号切换 / 单账号返回错误 |
-| API Key 限流(429) | RECOVERABLE 分类 + 切换 |
-| Key 脱敏 | 日志中无明文 Key |
-| .env 迁移 | KIRO_API_KEY → credentials.json |
-| 流式 + 非流式 | 两种模式都正常 |
-
-### 8.3 网络隔离
-
-复用 `conftest.py` 的 `block_all_network_calls`，对 API Key 的认证/请求全部 Mock。
+全量：**1719 passed, 0 failed**。
 
 ---
 
-## 9. 实施步骤清单（Checklist）
-
-```mermaid
-flowchart TD
-    S0["阶段0: ✅ 已完成<br/>协议验证: 直传Bearer@q.amazonaws.com"] --> S1
-    S1["阶段1: config.py<br/>+ KIRO_API_KEY"] --> S2
-    S2["阶段2: auth.py<br/>+ AuthType.API_KEY + 分支"] --> S3
-    S3["阶段3: account_manager.py<br/>+ type=api_key"] --> S4
-    S4["阶段4: main.py 迁移 + example"] --> S5
-    S5["阶段5: 脱敏检查"] --> S6
-    S6["阶段6: 单元测试"] --> S7
-    S7["阶段7: 集成测试"] --> S8
-    S8["阶段8: 文档更新(README多语言)"] --> DONE["✅ 完成"]
-
-    style S0 fill:#FFE4B5
-    style DONE fill:#90EE90
-```
-
-### 9.1 步骤明细
-
-| # | 步骤 | 涉及文件 | 风险 |
-|---|------|----------|------|
-| 0 | 实测 API Key 协议 | (抓包/测试) | 🟠 决定A/B方案 |
-| 1 | 新增环境变量 | `config.py` | 🟢 低 |
-| 2 | 扩展认证类型 | `auth.py` | 🟠 中 |
-| 3 | 多账号集成 | `account_manager.py` | 🟠 中 |
-| 4 | 迁移+示例 | `main.py`, `credentials.json.example` | 🟢 低 |
-| 5 | 安全脱敏 | `auth.py`, `debug_logger.py` | 🟢 低 |
-| 6 | 单元测试 | `tests/unit/` | 🟠 中 |
-| 7 | 集成测试 | `tests/integration/` | 🟠 中 |
-| 8 | 文档 | `README.md` + `docs/*` | 🟢 低 |
-
----
-
-## 10. 总结
-
-### 10.1 结论
+## 7. 结论
 
 | 问题 | 答案 |
 |------|------|
-| 能否新增 API Key 凭证来源? | ✅ **能，且高度契合现有架构** |
-| 是否兼容现有功能? | ✅ **纯增量变更，零破坏性** |
-| 与多账号融合度? | ✅ **极高，每个 Key = 一个账号，自动复用所有编排能力** |
-| 实现复杂度? | 🟢 **低**（API Key 是现有逻辑的简化子集，无需刷新） |
-| 主要不确定性? | ✅ **已消除**：协议经 POC 实测验证 —— 直传 Bearer 到 `q.{region}.amazonaws.com` + `ListAvailableProfiles` 发现 profileArn（§2.3） |
-| 实现状态? | ✅ **已实现并测试**（1715 测试通过，零回归，见 `API_KEY_AUTH_POC_RESULT.md`） |
+| 能否新增 API Key 凭证来源? | ✅ 能，已实现并测试 |
+| 传输协议? | ✅ 直传 Bearer 到 `q.{region}.amazonaws.com`（无交换） |
+| profileArn 如何获得? | ✅ 显式 `profile_arn`（主路径）；`ListAvailableProfiles` best-effort 自动发现 |
+| 与多账号融合度? | ✅ 每个 Key = 一个账号，复用全部编排能力 |
+| 是否兼容现有功能? | ✅ 纯增量，1719 测试零回归 |
+| `ksk_` 限制? | ⚠️ 会话密钥需显式 profile_arn；模型访问受 profile 门控 |
 
-### 10.2 核心设计要点回顾
-
-```mermaid
-mindmap
-  root((集成方案))
-    最小改动
-      auth.py 加分支
-      account_manager.py 加type
-      上层零改动
-    完全兼容
-      纯Additive变更
-      不碰现有4种认证
-    深度融合
-      api_key=账号
-      复用CircuitBreaker
-      复用故障切换
-    弹性设计
-      适配 q.amazonaws.com 服务端点
-      force_refresh安全降级
-    安全优先
-      Key脱敏
-      hash做account_id
-```
-
----
-
-> **文档性质**：调研分析 + 集成方案设计（不含实际代码改动）
-> **分析版本**：v2.4.dev.13
-> **参考来源**：
-> - [Kiro CLI 认证方法](https://kiro.dev/docs/cli/authentication/)
-> - [Kiro Headless 模式](https://kiro.dev/docs/cli/headless/)
-> - [Kiro 企业 API Key 治理](https://kiro.dev/docs/enterprise/governance/api-keys/)
-> - [Headless 模式介绍博客](https://kiro.dev/blog/introducing-headless-mode/)
->
-> 上述外部内容已按授权许可要求改写。
+> 详细实施结果见 [`API_KEY_AUTH_POC_RESULT.md`](API_KEY_AUTH_POC_RESULT.md)。
