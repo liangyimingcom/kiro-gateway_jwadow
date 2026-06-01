@@ -47,6 +47,8 @@ from kiro.config import (
     get_kiro_api_host,
     get_kiro_q_host,
     get_aws_sso_oidc_url,
+    get_kiro_api_key_exchange_url,
+    KIRO_API_KEY_EXCHANGE_CONFIRMED,
 )
 from kiro.utils import get_machine_fingerprint
 
@@ -77,9 +79,35 @@ class AuthType(Enum):
         - Uses https://oidc.{region}.amazonaws.com/token
         - Form body: grant_type=refresh_token&client_id=...&client_secret=...&refresh_token=...
         - Requires clientId and clientSecret from credentials file
+
+    API_KEY: Kiro headless / API-key authentication (Kiro Pro/Pro+/Power)
+        - The raw API key (prefix "ksk_") is exchanged for a short-lived access
+          token via the configured exchange endpoint (see config.KIRO_API_KEY_EXCHANGE_URL).
+        - Verified: the raw key is NOT accepted as a direct Bearer token by the
+          runtime endpoint, hence the exchange step.
     """
     KIRO_DESKTOP = "kiro_desktop"
     AWS_SSO_OIDC = "aws_sso_oidc"
+    API_KEY = "api_key"
+
+
+def _redact_secret(secret: Optional[str]) -> str:
+    """
+    Redacts a secret for safe logging.
+
+    Shows only a short prefix so logs remain useful for debugging without
+    leaking the full credential.
+
+    Args:
+        secret: The secret string (API key, token, etc.) or None
+
+    Returns:
+        Redacted representation, e.g. "ksk_kGR8...<redacted>" or "<none>"
+    """
+    if not secret:
+        return "<none>"
+    prefix = secret[:8]
+    return f"{prefix}...<redacted len={len(secret)}>"
 
 
 class KiroAuthManager:
@@ -126,6 +154,7 @@ class KiroAuthManager:
         client_secret: Optional[str] = None,
         sqlite_db: Optional[str] = None,
         api_region: Optional[str] = None,
+        api_key: Optional[str] = None,
     ):
         """
         Initializes the authentication manager.
@@ -141,12 +170,16 @@ class KiroAuthManager:
                        Default location: ~/.local/share/kiro-cli/data.sqlite3
             api_region: Q API region override (optional, per-account)
                        If not specified, uses auto-detection or falls back to region
+            api_key: Kiro API key (prefix "ksk_") for headless/API-key auth (optional).
+                       When provided, auth_type is forced to API_KEY and the key is
+                       exchanged for a short-lived access token on demand.
         """
         self._refresh_token = refresh_token
         self._profile_arn = profile_arn
         self._region = region
         self._creds_file = creds_file
         self._sqlite_db = sqlite_db
+        self._api_key = api_key
         
         # AWS SSO OIDC specific fields
         self._client_id: Optional[str] = client_id
@@ -234,11 +267,19 @@ class KiroAuthManager:
     def _detect_auth_type(self) -> None:
         """
         Detects authentication type based on available credentials.
-        
+
+        Priority:
+        1. API_KEY      - if an explicit API key was provided (highest priority)
+        2. AWS_SSO_OIDC - if clientId and clientSecret are present
+        3. KIRO_DESKTOP - default fallback
+
         AWS SSO OIDC credentials contain clientId and clientSecret.
         Kiro Desktop credentials do not contain these fields.
         """
-        if self._client_id and self._client_secret:
+        if self._api_key:
+            self._auth_type = AuthType.API_KEY
+            logger.info(f"Detected auth type: API_KEY (key={_redact_secret(self._api_key)})")
+        elif self._client_id and self._client_secret:
             self._auth_type = AuthType.AWS_SSO_OIDC
             logger.info("Detected auth type: AWS SSO OIDC (kiro-cli)")
         else:
@@ -671,15 +712,87 @@ class KiroAuthManager:
         Routes to appropriate refresh method based on auth type:
         - KIRO_DESKTOP: Uses Kiro Desktop Auth endpoint
         - AWS_SSO_OIDC: Uses AWS SSO OIDC endpoint
+        - API_KEY: Exchanges the API key for a short-lived access token
         
         Raises:
             ValueError: If refresh token is not set or response doesn't contain accessToken
             httpx.HTTPError: On HTTP request error
         """
-        if self._auth_type == AuthType.AWS_SSO_OIDC:
+        if self._auth_type == AuthType.API_KEY:
+            await self._refresh_token_api_key()
+        elif self._auth_type == AuthType.AWS_SSO_OIDC:
             await self._refresh_token_aws_sso_oidc()
         else:
             await self._refresh_token_kiro_desktop()
+
+    async def _refresh_token_api_key(self) -> None:
+        """
+        Exchanges a Kiro API key (ksk_...) for a short-lived access token.
+
+        Protocol note (verified via live probing, 2026-05):
+        - The raw API key is NOT accepted as a direct Bearer token by the
+          runtime endpoint (`runtime.{region}.kiro.dev`), which returns
+          403 "The bearer token included in the request is invalid".
+        - Therefore an exchange step is required. The exact exchange operation
+          is not part of the public documentation yet, so the endpoint is
+          configurable via the KIRO_API_KEY_EXCHANGE_URL environment variable.
+
+        When the exchange endpoint has not been explicitly confirmed
+        (KIRO_API_KEY_EXCHANGE_CONFIRMED is False), this method raises a clear,
+        actionable error instead of silently sending requests to an unverified
+        endpoint.
+
+        Raises:
+            ValueError: If the API key is not set or the exchange endpoint is
+                        not confirmed, or the response lacks an access token.
+            httpx.HTTPError: On HTTP request error.
+        """
+        if not self._api_key:
+            raise ValueError("API key is not set")
+
+        if not KIRO_API_KEY_EXCHANGE_CONFIRMED:
+            raise ValueError(
+                "API key authentication requires a confirmed exchange endpoint. "
+                "The raw Kiro API key cannot be used directly as a Bearer token; "
+                "it must be exchanged for an access token. Set the KIRO_API_KEY_EXCHANGE_URL "
+                "environment variable to the verified exchange endpoint "
+                "(template may include '{region}'). "
+                "See docs/zh/API_KEY_AUTH_POC_RESULT.md for details."
+            )
+
+        sso_region = self._sso_region or self._region
+        url = get_kiro_api_key_exchange_url(sso_region)
+
+        logger.info(f"Exchanging Kiro API key for access token (key={_redact_secret(self._api_key)})...")
+
+        # Exchange request body. Field names follow the conventions used by the
+        # existing token endpoints; adjust if the confirmed endpoint differs.
+        payload = {"apiKey": self._api_key}
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": f"KiroIDE-0.7.45-{self._fingerprint}",
+        }
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.post(url, json=payload, headers=headers)
+            response.raise_for_status()
+            data = response.json()
+
+        new_access_token = data.get("accessToken") or data.get("access_token")
+        expires_in = data.get("expiresIn") or data.get("expires_in") or 3600
+        new_profile_arn = data.get("profileArn") or data.get("profile_arn")
+
+        if not new_access_token:
+            raise ValueError(f"API key exchange response does not contain accessToken: {data}")
+
+        self._access_token = new_access_token
+        if new_profile_arn and not self._profile_arn:
+            self._profile_arn = new_profile_arn
+
+        # Apply expiration with a 60-second safety buffer
+        self._expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_in - 60)
+
+        logger.info(f"API key exchanged successfully, token expires: {self._expires_at.isoformat()}")
     
     async def _refresh_token_kiro_desktop(self) -> None:
         """
@@ -973,5 +1086,5 @@ class KiroAuthManager:
     
     @property
     def auth_type(self) -> AuthType:
-        """Authentication type (KIRO_DESKTOP or AWS_SSO_OIDC)."""
+        """Authentication type (KIRO_DESKTOP, AWS_SSO_OIDC, or API_KEY)."""
         return self._auth_type

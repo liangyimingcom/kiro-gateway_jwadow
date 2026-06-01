@@ -127,6 +127,17 @@ VPN_PROXY_URL: str = os.getenv("VPN_PROXY_URL", "")
 # Refresh token for updating access token
 REFRESH_TOKEN: str = os.getenv("REFRESH_TOKEN", "")
 
+# API key for Kiro headless / API-key authentication (Kiro Pro/Pro+/Power).
+# Issued by the Kiro portal/console. When set, this is treated as a credential
+# source equivalent to a single account (see Account System).
+#
+# IMPORTANT (verified via protocol probing, see docs/zh/API_KEY_AUTH_POC_RESULT.md):
+# The raw API key (prefix "ksk_") is NOT accepted as a direct Bearer token by the
+# runtime endpoint. It must be exchanged for a short-lived access token first.
+# The exact exchange operation is not part of the public documentation yet, so the
+# exchange endpoint is configurable via KIRO_API_KEY_EXCHANGE_URL below.
+KIRO_API_KEY: str = os.getenv("KIRO_API_KEY", "")
+
 # Profile ARN for AWS CodeWhisperer
 PROFILE_ARN: str = os.getenv("PROFILE_ARN", "")
 
@@ -174,6 +185,20 @@ KIRO_REFRESH_URL_TEMPLATE: str = "https://prod.{region}.auth.desktop.kiro.dev/re
 
 # URL for token refresh (AWS SSO OIDC - used by kiro-cli)
 AWS_SSO_OIDC_URL_TEMPLATE: str = "https://oidc.{region}.amazonaws.com/token"
+
+# URL for exchanging a Kiro API key (ksk_...) for a short-lived access token.
+#
+# Protocol note: verified probing shows the raw API key is NOT a direct Bearer
+# token for the runtime endpoint, so an exchange step is required. The exact
+# operation is not publicly documented yet; this template is therefore
+# overridable via the KIRO_API_KEY_EXCHANGE_URL environment variable so the
+# integration can be completed without code changes once the endpoint is known.
+#
+# Default points at the Kiro Desktop Auth host (same host used by /refreshToken).
+KIRO_API_KEY_EXCHANGE_URL_TEMPLATE: str = os.getenv(
+    "KIRO_API_KEY_EXCHANGE_URL",
+    "https://prod.{region}.auth.desktop.kiro.dev/apiKeyToken",
+)
 
 # Host for main API (generateAssistantResponse)
 # Universal endpoint for all regions (us-east-1, eu-central-1, etc.)
@@ -568,6 +593,17 @@ def get_kiro_refresh_url(region: str) -> str:
 def get_aws_sso_oidc_url(region: str) -> str:
     """Return AWS SSO OIDC token URL for the specified region."""
     return AWS_SSO_OIDC_URL_TEMPLATE.format(region=region)
+
+
+# Whether the API-key exchange endpoint has been explicitly configured/confirmed.
+# When False, the gateway uses the (unverified) default endpoint and logs a warning.
+# Set KIRO_API_KEY_EXCHANGE_URL in the environment to mark it as confirmed.
+KIRO_API_KEY_EXCHANGE_CONFIRMED: bool = bool(os.getenv("KIRO_API_KEY_EXCHANGE_URL"))
+
+
+def get_kiro_api_key_exchange_url(region: str) -> str:
+    """Return the API-key -> access-token exchange URL for the specified region."""
+    return KIRO_API_KEY_EXCHANGE_URL_TEMPLATE.format(region=region)
 
 
 def get_kiro_api_host(region: str) -> str:

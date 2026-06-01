@@ -1300,3 +1300,114 @@ class TestFormatDuration:
         """Test formatting days."""
         assert _format_duration(86400) == "1d"
         assert _format_duration(172800) == "2d"
+
+
+
+class TestAccountManagerApiKeyType:
+    """
+    Tests for AccountManager handling of the api_key credential type.
+
+    Verifies that each API key is treated as a distinct account and integrates
+    with the multi-account system (stable, hashed account_id; raw key not stored
+    as identifier).
+    """
+
+    @pytest.mark.asyncio
+    async def test_load_credentials_api_key_type(self, tmp_path):
+        """
+        What it does: Loads credentials with type=api_key.
+        Purpose: Verify api_key entries become accounts with hashed IDs.
+        """
+        print("\n=== Test: load_credentials with type=api_key ===")
+        creds = [
+            {"type": "api_key", "api_key": "ksk_test_key_aaaaaaaaaaaa"}
+        ]
+        creds_file = tmp_path / "credentials.json"
+        creds_file.write_text(json.dumps(creds))
+        state_file = tmp_path / "state.json"
+
+        manager = AccountManager(str(creds_file), str(state_file))
+        await manager.load_credentials()
+
+        assert len(manager._accounts) == 1
+        account_id = list(manager._accounts.keys())[0]
+        print(f"account_id = {account_id}")
+        assert account_id.startswith("api_key_")
+        # The raw key must NOT appear in the account id
+        assert "ksk_test_key_aaaaaaaaaaaa" not in account_id
+
+    @pytest.mark.asyncio
+    async def test_load_credentials_api_key_deterministic_id(self, tmp_path):
+        """
+        What it does: Same api_key yields the same account_id across loads.
+        Purpose: Verify deterministic hashing (stable across restarts).
+        """
+        creds = [{"type": "api_key", "api_key": "ksk_same_key_value_123"}]
+        creds_file = tmp_path / "credentials.json"
+        creds_file.write_text(json.dumps(creds))
+        state_file = tmp_path / "state.json"
+
+        m1 = AccountManager(str(creds_file), str(state_file))
+        await m1.load_credentials()
+        m2 = AccountManager(str(creds_file), str(state_file))
+        await m2.load_credentials()
+
+        assert list(m1._accounts.keys()) == list(m2._accounts.keys())
+
+    @pytest.mark.asyncio
+    async def test_load_credentials_api_key_missing_field_skipped(self, tmp_path):
+        """
+        What it does: Entries with type=api_key but no api_key are skipped.
+        Purpose: Verify validation rejects incomplete api_key entries.
+        """
+        creds = [
+            {"type": "api_key"},  # missing api_key -> skipped
+            {"type": "api_key", "api_key": "ksk_valid_key_xyz"},  # valid
+        ]
+        creds_file = tmp_path / "credentials.json"
+        creds_file.write_text(json.dumps(creds))
+        state_file = tmp_path / "state.json"
+
+        manager = AccountManager(str(creds_file), str(state_file))
+        await manager.load_credentials()
+
+        assert len(manager._accounts) == 1
+
+    @pytest.mark.asyncio
+    async def test_load_credentials_multiple_api_keys_distinct_accounts(self, tmp_path):
+        """
+        What it does: Two different api_keys create two distinct accounts.
+        Purpose: Verify "each API key = one account" for multi-account failover.
+        """
+        creds = [
+            {"type": "api_key", "api_key": "ksk_key_one_111"},
+            {"type": "api_key", "api_key": "ksk_key_two_222"},
+        ]
+        creds_file = tmp_path / "credentials.json"
+        creds_file.write_text(json.dumps(creds))
+        state_file = tmp_path / "state.json"
+
+        manager = AccountManager(str(creds_file), str(state_file))
+        await manager.load_credentials()
+
+        assert len(manager._accounts) == 2
+
+    @pytest.mark.asyncio
+    async def test_load_credentials_mixed_api_key_and_json(self, tmp_path, temp_creds_file):
+        """
+        What it does: api_key and json accounts coexist.
+        Purpose: Verify heterogeneous credential types are loaded together.
+        """
+        creds = [
+            {"type": "api_key", "api_key": "ksk_mixed_key_999"},
+            {"type": "json", "path": temp_creds_file},
+        ]
+        creds_file = tmp_path / "credentials.json"
+        creds_file.write_text(json.dumps(creds))
+        state_file = tmp_path / "state.json"
+
+        manager = AccountManager(str(creds_file), str(state_file))
+        await manager.load_credentials()
+
+        assert len(manager._accounts) == 2
+        assert any(aid.startswith("api_key_") for aid in manager._accounts)

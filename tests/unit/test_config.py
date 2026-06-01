@@ -969,3 +969,52 @@ class TestAccountSystemConfig:
         
         print(f"Comparing STATE_SAVE_INTERVAL_SECONDS: Expected 10, Got {config_module.STATE_SAVE_INTERVAL_SECONDS}")
         assert config_module.STATE_SAVE_INTERVAL_SECONDS == 10
+
+
+
+class TestApiKeyConfig:
+    """Tests for API Key authentication configuration."""
+
+    def test_api_key_exchange_url_default_template_has_region_placeholder(self):
+        """
+        What it does: Verifies the default exchange URL template contains {region}.
+        Purpose: Ensure region substitution works for the exchange endpoint.
+        """
+        from kiro.config import KIRO_API_KEY_EXCHANGE_URL_TEMPLATE
+        print(f"Template: {KIRO_API_KEY_EXCHANGE_URL_TEMPLATE}")
+        assert "{region}" in KIRO_API_KEY_EXCHANGE_URL_TEMPLATE
+
+    def test_get_kiro_api_key_exchange_url_substitutes_region(self):
+        """
+        What it does: Verifies get_kiro_api_key_exchange_url substitutes the region.
+        Purpose: Ensure the helper builds a region-specific URL.
+        """
+        from kiro.config import get_kiro_api_key_exchange_url
+        url = get_kiro_api_key_exchange_url("eu-central-1")
+        print(f"Exchange URL: {url}")
+        assert "eu-central-1" in url
+        assert url.startswith("https://")
+
+    def test_api_key_exchange_confirmed_flag_is_bool(self):
+        """
+        What it does: Verifies KIRO_API_KEY_EXCHANGE_CONFIRMED is a boolean.
+        Purpose: Ensure the confirmed flag has the expected type.
+        """
+        from kiro.config import KIRO_API_KEY_EXCHANGE_CONFIRMED
+        assert isinstance(KIRO_API_KEY_EXCHANGE_CONFIRMED, bool)
+
+    def test_api_key_exchange_url_respects_env_override(self):
+        """
+        What it does: Verifies KIRO_API_KEY_EXCHANGE_URL env var overrides default.
+        Purpose: Ensure operators can point at the verified endpoint without code changes.
+        """
+        import importlib
+        with patch.dict(os.environ, {"KIRO_API_KEY_EXCHANGE_URL": "https://example.test/{region}/x"}):
+            import kiro.config as cfg
+            importlib.reload(cfg)
+            try:
+                assert cfg.KIRO_API_KEY_EXCHANGE_CONFIRMED is True
+                assert cfg.get_kiro_api_key_exchange_url("us-east-1") == "https://example.test/us-east-1/x"
+            finally:
+                # Reload again without the override to restore module state
+                importlib.reload(cfg)

@@ -256,7 +256,23 @@ class AccountManager:
             if cred_type == "refresh_token" and not entry.get("refresh_token"):
                 logger.warning(f"Invalid credential entry (type=refresh_token requires refresh_token field): {entry}")
                 continue
-            
+
+            # For api_key type, api_key field is required
+            if cred_type == "api_key" and not entry.get("api_key"):
+                logger.warning(f"Invalid credential entry (type=api_key requires api_key field): {entry}")
+                continue
+
+            # Handle api_key type (no path processing needed)
+            if cred_type == "api_key":
+                # Use deterministic hash so account_id is stable across restarts
+                # and the raw key is never stored as an identifier.
+                key = entry.get("api_key", "")
+                key_hash = hashlib.sha256(key.encode()).hexdigest()[:16]
+                account_id = f"api_key_{key_hash}"
+                self._accounts[account_id] = Account(id=account_id)
+                logger.debug(f"Added account: {account_id}")
+                continue  # Skip path processing for api_key
+
             # Handle refresh_token type (no path processing needed)
             if cred_type == "refresh_token":
                 # Use deterministic hash for refresh_token (hash() is not deterministic between process restarts)
@@ -459,6 +475,13 @@ class AccountManager:
                     if account_id == f"refresh_token_{token_hash}":
                         creds_config = entry
                         break
+                elif entry.get("type") == "api_key":
+                    # Match by deterministic hash for api_key type
+                    key = entry.get('api_key', '')
+                    key_hash = hashlib.sha256(key.encode()).hexdigest()[:16]
+                    if account_id == f"api_key_{key_hash}":
+                        creds_config = entry
+                        break
                 elif str(expanded_path.resolve()) == account_id or (expanded_path.is_dir() and account_id.startswith(str(expanded_path.resolve()) + os.sep)):
                     creds_config = entry
                     break
@@ -486,6 +509,13 @@ class AccountManager:
             elif cred_type == "refresh_token":
                 auth_manager = KiroAuthManager(
                     refresh_token=creds_config.get("refresh_token"),
+                    profile_arn=creds_config.get("profile_arn"),
+                    region=creds_config.get("region", "us-east-1"),
+                    api_region=creds_config.get("api_region")
+                )
+            elif cred_type == "api_key":
+                auth_manager = KiroAuthManager(
+                    api_key=creds_config.get("api_key"),
                     profile_arn=creds_config.get("profile_arn"),
                     region=creds_config.get("region", "us-east-1"),
                     api_region=creds_config.get("api_region")

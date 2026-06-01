@@ -511,7 +511,7 @@ class TestAuthTypeEnum:
     def test_auth_type_enum_values(self):
         """
         What it does: Verifies AuthType enum values.
-        Purpose: Ensure enum contains KIRO_DESKTOP and AWS_SSO_OIDC.
+        Purpose: Ensure enum contains KIRO_DESKTOP, AWS_SSO_OIDC and API_KEY.
         """
         print("Verification: AuthType contains KIRO_DESKTOP...")
         assert AuthType.KIRO_DESKTOP.value == "kiro_desktop"
@@ -519,8 +519,11 @@ class TestAuthTypeEnum:
         print("Verification: AuthType contains AWS_SSO_OIDC...")
         assert AuthType.AWS_SSO_OIDC.value == "aws_sso_oidc"
         
-        print(f"Comparing value count: Expected 2, Got {len(AuthType)}")
-        assert len(AuthType) == 2
+        print("Verification: AuthType contains API_KEY...")
+        assert AuthType.API_KEY.value == "api_key"
+        
+        print(f"Comparing value count: Expected 3, Got {len(AuthType)}")
+        assert len(AuthType) == 3
 
 
 # =============================================================================
@@ -4251,3 +4254,166 @@ class TestAPIRegionPriorityHierarchy:
         print(f"Result: api_host={manager5._api_host}")
         assert "ap-south-1" in manager5._api_host
 
+
+
+
+# =============================================================================
+# Tests for API_KEY authentication (Authenticate with an API key)
+# =============================================================================
+
+class TestKiroAuthManagerApiKeyDetection:
+    """Tests for API_KEY auth type detection priority."""
+
+    def test_detect_auth_type_api_key_takes_priority(self):
+        """
+        What it does: Verifies API_KEY detection wins even when other creds exist.
+        Purpose: Ensure an explicit api_key forces API_KEY auth (highest priority).
+        """
+        print("Setup: Creating KiroAuthManager with api_key + client credentials...")
+        manager = KiroAuthManager(
+            api_key="ksk_test_key_123456",
+            refresh_token="test_token",
+            client_id="test_client_id",
+            client_secret="test_client_secret",
+        )
+        print(f"Comparing auth_type: Expected API_KEY, Got {manager.auth_type}")
+        assert manager.auth_type == AuthType.API_KEY
+
+    def test_detect_auth_type_api_key_only(self):
+        """
+        What it does: Verifies API_KEY detection with only an api_key.
+        Purpose: Ensure api_key alone selects API_KEY auth.
+        """
+        manager = KiroAuthManager(api_key="ksk_test_key_123456")
+        assert manager.auth_type == AuthType.API_KEY
+
+
+class TestKiroAuthManagerApiKey:
+    """Tests for the API_KEY credential source (Kiro headless / API key auth)."""
+
+    def test_api_key_stored_on_init(self):
+        """
+        What it does: Verifies the api_key is stored on the instance.
+        Purpose: Ensure the constructor accepts and keeps the api_key.
+        """
+        manager = KiroAuthManager(api_key="ksk_abcdef1234567890")
+        assert manager._api_key == "ksk_abcdef1234567890"
+        assert manager.auth_type == AuthType.API_KEY
+
+    @pytest.mark.asyncio
+    async def test_exchange_raises_when_endpoint_not_confirmed(self, monkeypatch):
+        """
+        What it does: Verifies a clear error when the exchange endpoint isn't confirmed.
+        Purpose: Avoid silently calling an unverified endpoint (verified finding:
+                 the raw key is NOT a direct Bearer token).
+        """
+        import kiro.auth as auth_mod
+        monkeypatch.setattr(auth_mod, "KIRO_API_KEY_EXCHANGE_CONFIRMED", False)
+
+        manager = KiroAuthManager(api_key="ksk_abcdef1234567890")
+        with pytest.raises(ValueError) as exc_info:
+            await manager._refresh_token_api_key()
+
+        print(f"Error message: {exc_info.value}")
+        assert "exchange" in str(exc_info.value).lower()
+
+    @pytest.mark.asyncio
+    async def test_exchange_raises_when_no_api_key(self, monkeypatch):
+        """
+        What it does: Verifies ValueError when api_key is missing but exchange called.
+        Purpose: Defensive guard.
+        """
+        import kiro.auth as auth_mod
+        monkeypatch.setattr(auth_mod, "KIRO_API_KEY_EXCHANGE_CONFIRMED", True)
+
+        manager = KiroAuthManager(refresh_token="x")  # no api_key
+        manager._api_key = None
+        with pytest.raises(ValueError) as exc_info:
+            await manager._refresh_token_api_key()
+        assert "API key is not set" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_exchange_success_when_confirmed(self, monkeypatch):
+        """
+        What it does: Verifies a successful API key exchange sets the access token.
+        Purpose: Ensure exchange parses accessToken/expiresIn/profileArn correctly.
+        """
+        import kiro.auth as auth_mod
+        monkeypatch.setattr(auth_mod, "KIRO_API_KEY_EXCHANGE_CONFIRMED", True)
+
+        manager = KiroAuthManager(api_key="ksk_abcdef1234567890")
+
+        mock_response = AsyncMock()
+        mock_response.status_code = 200
+        mock_response.json = Mock(return_value={
+            "accessToken": "exchanged_access_token_xyz",
+            "expiresIn": 3600,
+            "profileArn": "arn:aws:codewhisperer:us-east-1:111:profile/from-key",
+        })
+        mock_response.raise_for_status = Mock()
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("kiro.auth.httpx.AsyncClient", return_value=mock_client):
+            await manager._refresh_token_api_key()
+
+        print(f"Access token after exchange: {manager._access_token}")
+        assert manager._access_token == "exchanged_access_token_xyz"
+        assert manager.profile_arn == "arn:aws:codewhisperer:us-east-1:111:profile/from-key"
+        assert manager._expires_at is not None
+
+    @pytest.mark.asyncio
+    async def test_exchange_missing_access_token_raises(self, monkeypatch):
+        """
+        What it does: Verifies an error when the exchange response lacks accessToken.
+        Purpose: Defensive handling of malformed exchange responses.
+        """
+        import kiro.auth as auth_mod
+        monkeypatch.setattr(auth_mod, "KIRO_API_KEY_EXCHANGE_CONFIRMED", True)
+
+        manager = KiroAuthManager(api_key="ksk_abcdef1234567890")
+
+        mock_response = AsyncMock()
+        mock_response.status_code = 200
+        mock_response.json = Mock(return_value={"somethingElse": "value"})
+        mock_response.raise_for_status = Mock()
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("kiro.auth.httpx.AsyncClient", return_value=mock_client):
+            with pytest.raises(ValueError) as exc_info:
+                await manager._refresh_token_api_key()
+
+        assert "accessToken" in str(exc_info.value)
+
+
+class TestRedactSecret:
+    """Tests for the _redact_secret() logging-safety helper."""
+
+    def test_redact_secret_does_not_expose_full_key(self):
+        """
+        What it does: Verifies _redact_secret only reveals a short prefix.
+        Purpose: Ensure API keys are never fully exposed in logs.
+        """
+        from kiro.auth import _redact_secret
+
+        redacted = _redact_secret("ksk_supersecretvalue_should_not_appear")
+        print(f"Redacted: {redacted}")
+        assert "should_not_appear" not in redacted
+        assert redacted.startswith("ksk_")
+
+    def test_redact_secret_handles_empty_and_none(self):
+        """
+        What it does: Verifies _redact_secret handles empty/None safely.
+        Purpose: Avoid crashes when no secret is present.
+        """
+        from kiro.auth import _redact_secret
+
+        assert _redact_secret("") == "<none>"
+        assert _redact_secret(None) == "<none>"
