@@ -127,16 +127,16 @@ VPN_PROXY_URL: str = os.getenv("VPN_PROXY_URL", "")
 # Refresh token for updating access token
 REFRESH_TOKEN: str = os.getenv("REFRESH_TOKEN", "")
 
-# API key for Kiro headless / API-key authentication (Kiro Pro/Pro+/Power).
-# Issued by the Kiro portal/console. When set, this is treated as a credential
-# source equivalent to a single account (see Account System).
+# Kiro Session Key for API-key authentication (created on the Kiro website).
+# When set, this is treated as a credential source equivalent to a single account.
 #
 # Protocol (verified via official CLI binary analysis + live probing, see
 # docs/zh/API_KEY_AUTH_POC_RESULT.md):
-# The API key (prefix "ksk_") is used DIRECTLY as an HTTP Bearer token against the
-# AWS CodeWhisperer / Q Developer service endpoint (q.{region}.amazonaws.com),
-# NOT against runtime.kiro.dev. No token exchange is required. The profileArn is
-# discovered at runtime via the ListAvailableProfiles operation.
+# A Kiro Session Key (prefix "ksk_") is an AUTHENTICATION-ONLY credential. It is
+# used directly as an HTTP Bearer token against the AWS CodeWhisperer / Q Developer
+# identity endpoint (q.{region}.amazonaws.com). It confirms identity (validated via
+# ListAvailableProfiles -> HTTP 200) but does NOT, by itself, grant model-serving
+# access. No token exchange is required.
 KIRO_API_KEY: str = os.getenv("KIRO_API_KEY", "")
 
 # Profile ARN for AWS CodeWhisperer
@@ -187,12 +187,11 @@ KIRO_REFRESH_URL_TEMPLATE: str = "https://prod.{region}.auth.desktop.kiro.dev/re
 # URL for token refresh (AWS SSO OIDC - used by kiro-cli)
 AWS_SSO_OIDC_URL_TEMPLATE: str = "https://oidc.{region}.amazonaws.com/token"
 
-# Service host for Kiro API-key authentication.
+# Service host for Kiro Session Key (API-key) authentication.
 #
-# Verified protocol: the API key is a direct Bearer token for the AWS
-# CodeWhisperer / Q Developer service at q.{region}.amazonaws.com. This host is
-# used both for profileArn discovery (ListAvailableProfiles) and for
-# generateAssistantResponse when authenticating with an API key.
+# Verified protocol: a Kiro Session Key is a direct Bearer token for the AWS
+# CodeWhisperer / Q Developer identity endpoint at q.{region}.amazonaws.com.
+# This host is used to validate the key (ListAvailableProfiles -> HTTP 200).
 #
 # Overridable via KIRO_API_KEY_SERVICE_URL (may contain '{region}').
 KIRO_API_KEY_SERVICE_HOST_TEMPLATE: str = os.getenv(

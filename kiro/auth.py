@@ -79,12 +79,13 @@ class AuthType(Enum):
         - Form body: grant_type=refresh_token&client_id=...&client_secret=...&refresh_token=...
         - Requires clientId and clientSecret from credentials file
 
-    API_KEY: Kiro headless / API-key authentication (Kiro Pro/Pro+/Power)
-        - The API key (prefix "ksk_") is used DIRECTLY as an HTTP Bearer token
-          against the AWS CodeWhisperer / Q Developer service endpoint
-          (q.{region}.amazonaws.com). No token exchange is required.
-        - The profileArn is discovered at runtime via ListAvailableProfiles.
-        - Verified against the official Kiro CLI binary and live probing.
+    API_KEY: Kiro Session Key authentication (created on the Kiro website)
+        - The key (prefix "ksk_") is an AUTHENTICATION-ONLY credential: it confirms
+          identity but does not, by itself, grant model-serving access.
+        - Used directly as an HTTP Bearer token against the AWS CodeWhisperer / Q
+          Developer identity endpoint (q.{region}.amazonaws.com).
+        - Validity is checked via validate() (ListAvailableProfiles -> HTTP 200).
+        - No token exchange and no expiry.
     """
     KIRO_DESKTOP = "kiro_desktop"
     AWS_SSO_OIDC = "aws_sso_oidc"
@@ -102,7 +103,7 @@ def _redact_secret(secret: Optional[str]) -> str:
         secret: The secret string (API key, token, etc.) or None
 
     Returns:
-        Redacted representation, e.g. "ksk_kGR8...<redacted>" or "<none>"
+        Redacted representation, e.g. "ksk_abc1...<redacted>" or "<none>"
     """
     if not secret:
         return "<none>"
@@ -741,28 +742,28 @@ class KiroAuthManager:
         else:
             await self._refresh_token_kiro_desktop()
 
-    async def _discover_profile_arn(self) -> None:
+    async def validate(self) -> bool:
         """
-        Discovers the profileArn for an API key via ListAvailableProfiles.
+        Validates that the Kiro Session Key (API key) is a live, authenticated credential.
 
-        Verified protocol (official Kiro CLI binary + live probing):
-        - The API key is used directly as an HTTP Bearer token.
-        - The CodeWhisperer service operation
-          `AmazonCodeWhispererService.ListAvailableProfiles` returns the
-          profile(s) associated with the key's identity.
-        - The first profile's ARN is used (matching the CLI's lazy resolution).
+        Kiro Session Keys (prefix "ksk_", created on the Kiro website) are
+        authentication-only credentials: they confirm identity but do not, by
+        themselves, grant model-serving access. This method calls the lightweight
+        identity operation `AmazonCodeWhispererService.ListAvailableProfiles`:
 
-        This is a no-op if a profileArn was already provided/discovered.
+        - HTTP 200  -> the key authenticates successfully (valid credential),
+                       regardless of whether any model-serving profile is provisioned.
+        - HTTP 401/403 (or other) -> the key is invalid / not authenticated.
 
-        Raises:
-            ValueError: If the API key is not set, or no profiles are available
-                        for the key (e.g. the key has no provisioned subscription).
-            httpx.HTTPError: On HTTP request error.
+        As a best-effort convenience, if the response happens to include a profile,
+        its ARN is adopted (so accounts that DO have a provisioned profile benefit),
+        but an empty profile list does NOT make the key invalid.
+
+        Returns:
+            True if the key authenticates (HTTP 200), False otherwise.
         """
-        if not self._api_key:
-            raise ValueError("API key is not set")
-        if self._profile_arn:
-            return  # Already known
+        if self._auth_type != AuthType.API_KEY or not self._api_key:
+            return False
 
         url = self._q_host  # q.{region}.amazonaws.com (set for API_KEY in __init__)
         headers = {
@@ -773,34 +774,33 @@ class KiroAuthManager:
         }
 
         logger.info(
-            f"Discovering profileArn via ListAvailableProfiles "
-            f"(key={_redact_secret(self._api_key)}, host={url})"
+            f"Validating Kiro Session Key (key={_redact_secret(self._api_key)}, host={url})"
         )
 
-        async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.post(url, json={"maxResults": 10}, headers=headers)
-            response.raise_for_status()
-            data = response.json()
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.post(url, json={"maxResults": 10}, headers=headers)
+        except Exception as e:
+            logger.warning(f"Session key validation request failed: {type(e).__name__}: {e}")
+            return False
 
-        profiles = data.get("profiles") or []
-        if not profiles:
-            raise ValueError(
-                "API key authenticated successfully, but ListAvailableProfiles returned "
-                "no profiles. Verified behavior: 'ksk_' keys are identity/session "
-                "credentials whose model access is gated by an assigned profile; many "
-                "keys (e.g. those created on the Kiro website without a provisioned "
-                "subscription profile) have no auto-discoverable profile. "
-                "Set 'profile_arn' explicitly for this API-key account (in credentials.json) "
-                "or PROFILE_ARN in .env to use it. "
-                "See docs/zh/API_KEY_AUTH_POC_RESULT.md for details."
-            )
+        if response.status_code == 200:
+            # Best-effort: adopt a profile ARN if the account happens to have one.
+            try:
+                profiles = response.json().get("profiles") or []
+                if profiles and not self._profile_arn:
+                    self._profile_arn = profiles[0].get("arn")
+                    logger.info(f"Session key has a provisioned profile: {self._profile_arn}")
+            except Exception:
+                pass
+            logger.info("Kiro Session Key authenticated successfully (valid credential)")
+            return True
 
-        arn = profiles[0].get("arn")
-        if not arn:
-            raise ValueError(f"ListAvailableProfiles returned a profile without 'arn': {profiles[0]}")
-
-        self._profile_arn = arn
-        logger.info(f"Discovered profileArn for API key: {arn}")
+        logger.warning(
+            f"Kiro Session Key authentication failed: HTTP {response.status_code} "
+            f"{response.text[:200]!r}"
+        )
+        return False
     
     async def _refresh_token_kiro_desktop(self) -> None:
         """
@@ -1006,15 +1006,13 @@ class KiroAuthManager:
         Raises:
             ValueError: If unable to obtain access token
         """
-        # API_KEY auth: the key IS the Bearer token (no refresh/exchange).
-        # We discover the profileArn once (lazily) and then return the key directly.
+        # API_KEY auth (Kiro Session Key): the key IS the Bearer credential.
+        # Session keys are authentication-only; there is nothing to refresh and
+        # no profile to resolve here. Return the key directly. Validity is checked
+        # separately via validate() (see _initialize_account).
         if self._auth_type == AuthType.API_KEY:
             if not self._api_key:
                 raise ValueError("API key is not set")
-            if not self._profile_arn:
-                async with self._lock:
-                    if not self._profile_arn:  # double-checked under lock
-                        await self._discover_profile_arn()
             return self._api_key
 
         async with self._lock:

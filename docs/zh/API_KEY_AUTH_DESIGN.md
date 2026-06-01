@@ -1,202 +1,137 @@
-# 新增凭证来源方案：Authenticate with an API key
+# 新增凭证来源调研：Authenticate with an API key（Kiro Session Key）
 
 > 版本：v2.4.dev.13 | 最后更新：2026-06-01
-> 状态：✅ 已实现并测试（全量 1719 测试通过，零回归）
+> 状态：✅ 已实现并测试（全量 1722 通过；两个真实 key 端到端认证通过）
 
-为 Kiro Gateway 的认证管理新增第 5 种凭证来源 **API Key 认证（`type=api_key`）**，
-与现有 4 种方式（JSON / refresh_token / SQLite / AWS SSO OIDC）共存，并融入多账号系统
-（每个 API Key = 一个账号）。
-
----
-
-## 1. 需求
-
-| 项 | 说明 |
-|----|------|
-| 目标 | 支持 Kiro 门户签发的 API Key（前缀 `ksk_`，用于 Kiro CLI headless 模式） |
-| 兼容 | 不影响现有 4 种认证方式（纯增量变更） |
-| 融合 | 每个 API Key 作为一个独立账号，复用故障切换 / Circuit Breaker / Sticky |
+为 Kiro Gateway 的**认证管理**模块新增第 5 种凭证来源 **Kiro Session Key（`ksk_`）**，
+**仅作为认证凭证使用**，与现有 4 种方式（JSON / refresh_token / SQLite / AWS SSO OIDC）共存，
+并融入多账号系统（每个 Session Key = 一个账号）。
 
 ---
 
-## 2. API Key 认证协议（已验证）
+## 1. 核心前提（已验证）
 
-> 通过**官方 Kiro CLI 二进制分析** + **真实端点探测**确定。外部信息已按授权许可改写。
+```mermaid
+mindmap
+  root((Kiro Session Key<br/>ksk_))
+    本质
+      kiro.dev 网站创建
+      身份/会话密钥
+      长期有效, 无过期
+    能做
+      ✅ 身份认证(凭证鉴权)
+      ✅ 作为 Bearer 凭证
+    不能做
+      ❌ 直接调用模型
+      ❌ ListAvailableModels(403)
+      ❌ 无绑定 profile
+    定位
+      仅作"认证管理"凭证来源
+```
 
-### 2.1 协议要点
+**结论**：`ksk_` Session Key 只能完成**身份认证**，无法用于模型调用
+（Kiro 平台不支持以 Session Key 直接调用模型）。因此本方案**只把它作为
+认证凭证来源**接入，不尝试用它做模型服务。
+
+
+---
+
+## 2. 调研：协议与权限层级
+
+通过**官方 Kiro CLI 二进制分析** + **真实端点探测**确定（外部信息已按授权许可改写）。
 
 | 维度 | 结论 |
 |------|------|
-| 传输方式 | API Key 直接作为 `Authorization: Bearer {ksk_key}`（**无需 token 交换**） |
-| 目标端点 | **`q.{region}.amazonaws.com`**（AWS CodeWhisperer/Q 服务），**非** `runtime.kiro.dev` |
-| 协议格式 | AWS Coral RPC：`Content-Type: application/x-amz-json-1.0` + `x-amz-target` |
-| profileArn | **需显式提供**；`ListAvailableProfiles` 对 `ksk_` 会话密钥返回空列表 |
-| 模型列表 | API Key 在 `ListAvailableModels` 上返回 403 → 跳过，使用静态 fallback 模型 |
-| 过期 | API Key 长期有效，无需刷新 |
+| 传输方式 | `ksk_` 直接作为 `Authorization: Bearer` |
+| 端点 | `q.{region}.amazonaws.com`（CodeWhisperer/Q 身份端点） |
+| 协议 | AWS Coral RPC：`Content-Type: application/x-amz-json-1.0` + `x-amz-target` |
+| 认证校验 | `ListAvailableProfiles` → **HTTP 200 = 凭证有效** |
+| 模型能力 | `ListAvailableModels` → **403**；无绑定 profile → 无法服务模型 |
 
-
-### 2.2 关键特性：`ksk_` 是"身份/会话密钥"
-
-`ksk_` API Key 能通过认证（"我是谁"），但其模型访问权限由**分配的 profile** 门控：
+### 权限分层（为什么只能做认证）
 
 ```mermaid
 flowchart TD
-    K["ksk_ API Key"] --> AUTH{发往 q.region.amazonaws.com}
-    AUTH -->|无 Authorization 头| E400["400 Missing bearer token"]
-    AUTH -->|带 Bearer ksk_| OK["✅ 认证通过 (200)"]
+    K["ksk_ Session Key"] --> L1{"第1层: 身份认证"}
+    L1 -->|无 Authorization 头| E1["400 Missing bearer token"]
+    L1 -->|带 Bearer ksk_| OK1["✅ 200 认证通过<br/>(ListAvailableProfiles)"]
+    OK1 --> L2{"第2层: 模型授权"}
+    L2 -->|"ListAvailableModels"| F403["❌ 403"]
+    L2 -->|"generateAssistantResponse"| F403b["❌ 403 not authorized"]
 
-    OK --> LP["ListAvailableProfiles"]
-    OK --> LM["ListAvailableModels"]
-    LP -->|未绑定订阅 profile| EMPTY["返回空列表 []"]
-    LM -->|权限门控| F403["403"]
+    OK1 --> USE["✅ 用途: 认证凭证来源"]
+    F403 --> NOUSE["❌ 不用于: 模型服务"]
+    F403b --> NOUSE
 
-    EMPTY --> NEED["⇒ 必须显式提供 profile_arn"]
-    F403 --> STATIC["⇒ 跳过, 使用静态 fallback 模型"]
-
-    style OK fill:#90EE90
-    style NEED fill:#FFE4B5
-    style STATIC fill:#FFE4B5
+    style OK1 fill:#90EE90
+    style USE fill:#90EE90
+    style NOUSE fill:#ff6b6b
 ```
 
-**设计取舍**：因 `ListAvailableProfiles` 对会话密钥返回空，**显式 `profile_arn` 是主路径**；
-自动发现仅作 best-effort（账号若已开通 profile 则自动生效）。
-
-### 2.3 请求时序
-
-```mermaid
-sequenceDiagram
-    participant GW as Kiro Gateway
-    participant Q as q.region.amazonaws.com
-
-    Note over GW: profile_arn 已配置?
-    alt 显式提供 (推荐)
-        GW->>GW: 直接使用 profile_arn
-    else 未提供 (best-effort)
-        GW->>Q: ListAvailableProfiles (Bearer ksk_)
-        Q-->>GW: profiles[] (会话密钥多为空→报错提示配置 profile_arn)
-    end
-    GW->>Q: generateAssistantResponse<br/>Bearer ksk_ + profileArn
-    Q-->>GW: SSE 流
-```
+**实测**：两个独立 `ksk_` key 行为一致 —— `ListAvailableProfiles` 200（认证通过），
+`ListAvailableModels` 403（无模型权限）。证明 Session Key 是**纯认证凭证**。
 
 
 ---
 
-## 3. 架构集成
+## 3. 方案设计：作为"认证管理"凭证来源
 
 ### 3.1 集成位置
 
 ```mermaid
 flowchart TD
     subgraph 配置
-        ENV[".env: KIRO_API_KEY + PROFILE_ARN"]
-        JSON["credentials.json: {type:api_key, api_key, profile_arn}"]
+        ENV[".env: KIRO_API_KEY"]
+        JSON["credentials.json: {type:api_key, api_key}"]
     end
     ENV -->|main.py 迁移| JSON
-    JSON --> AM[AccountManager.load_credentials]
-    AM -->|"account_id = api_key_{sha256[:16]}"| ACC[Account]
-    ACC --> INIT[_initialize_account]
+    JSON --> LC["AccountManager.load_credentials()"]
+    LC -->|"account_id = api_key_{sha256(key)[:16]}"| ACC["Account"]
+    ACC --> INIT["_initialize_account()"]
     INIT --> KAM["KiroAuthManager(api_key=...)"]
-    KAM --> DT[_detect_auth_type → API_KEY]
-    DT --> HOST["api_host/q_host 覆盖为 q.region.amazonaws.com"]
-
-    ACC --> POOL[统一账号池]
-    POOL --> CB[Circuit Breaker]
-    POOL --> STICKY[Sticky]
-    POOL --> FAIL["失效切换 (403/402/429)"]
+    KAM --> DT["_detect_auth_type → API_KEY"]
+    DT --> HOST["host = q.{region}.amazonaws.com"]
+    INIT --> VAL["await validate()<br/>(ListAvailableProfiles → 200?)"]
+    VAL -->|是| OK["✅ 账号就绪(已认证)"]
+    VAL -->|否| FAIL["❌ 初始化失败(key 无效)"]
 
     style DT fill:#90EE90
-    style HOST fill:#90EE90
+    style VAL fill:#90EE90
+    style OK fill:#90EE90
 ```
 
 ### 3.2 认证类型检测（API_KEY 最高优先级）
 
 ```mermaid
 flowchart TD
-    INIT[KiroAuthManager.__init__] --> C1{api_key 提供?}
-    C1 -->|是| AK[auth_type = API_KEY]
+    INIT["__init__"] --> C1{api_key 提供?}
+    C1 -->|是| AK["auth_type = API_KEY ⭐"]
     C1 -->|否| C2{clientId + clientSecret?}
-    C2 -->|是| OIDC[AWS_SSO_OIDC]
-    C2 -->|否| DESK[KIRO_DESKTOP]
+    C2 -->|是| OIDC["AWS_SSO_OIDC"]
+    C2 -->|否| DESK["KIRO_DESKTOP"]
     style AK fill:#90EE90
 ```
 
-### 3.3 多账号融合（每个 Key = 一个账号）
+### 3.3 KiroAuthManager 行为（API_KEY）
 
-- `account_id` 用 `api_key_{sha256(key)[:16]}` 生成（哈希，不存原始 key）
-- API Key 账号与 JSON/SQLite/refresh_token 账号**混合编排**
-- 自动继承故障切换：某 Key 被限流/失效 → 切换下一个账号
+| 方法 | 行为 |
+|------|------|
+| `get_access_token()` | 直接返回 `ksk_`（即 Bearer 凭证），**无网络调用** |
+| `validate()` | 调 `ListAvailableProfiles`，HTTP 200 → True（已认证），否则 False |
+| `is_token_expiring_soon()` | 恒为 `False`（Session Key 不过期） |
+| `force_refresh()` | 返回 `ksk_`（无可刷新内容） |
+| host 覆盖 | `api_host`/`q_host` = `q.{region}.amazonaws.com` |
 
+### 3.4 多账号融合
 
----
-
-## 4. 实现设计（与代码一一对应）
-
-### 4.1 `kiro/config.py`
-
-```python
-KIRO_API_KEY: str = os.getenv("KIRO_API_KEY", "")
-
-# API Key 直传 Bearer 的服务端点（q.{region}.amazonaws.com）
-KIRO_API_KEY_SERVICE_HOST_TEMPLATE: str = os.getenv(
-    "KIRO_API_KEY_SERVICE_URL", "https://q.{region}.amazonaws.com"
-)
-def get_kiro_api_key_service_host(region: str) -> str:
-    return KIRO_API_KEY_SERVICE_HOST_TEMPLATE.format(region=region)
-```
-
-### 4.2 `kiro/auth.py`
-
-```python
-class AuthType(Enum):
-    KIRO_DESKTOP = "kiro_desktop"
-    AWS_SSO_OIDC = "aws_sso_oidc"
-    API_KEY = "api_key"                      # 新增
-
-# __init__: 当 auth_type == API_KEY 时, 覆盖 host 为 q.{region}.amazonaws.com
-if self._auth_type == AuthType.API_KEY:
-    api_key_host = get_kiro_api_key_service_host(final_api_region)
-    self._api_host = api_key_host
-    self._q_host = api_key_host
-
-async def get_access_token(self) -> str:
-    if self._auth_type == AuthType.API_KEY:
-        if not self._profile_arn:            # best-effort 发现
-            async with self._lock:
-                if not self._profile_arn:
-                    await self._discover_profile_arn()  # ListAvailableProfiles
-        return self._api_key                  # Key 即 Bearer token
-
-def is_token_expiring_soon(self) -> bool:
-    if self._auth_type == AuthType.API_KEY:
-        return False                          # 永不过期
-```
-
-- `_discover_profile_arn()`：`POST {q_host}` + `x-amz-target: AmazonCodeWhispererService.ListAvailableProfiles`，取 `profiles[0].arn`；空列表时抛出指引设置 `profile_arn` 的清晰错误。
-- `force_refresh()`：API_KEY 直接返回 key（无交换）。
-- `_redact_secret()`：日志仅显示前 8 位 + 长度。
-
-### 4.3 `kiro/account_manager.py`
-
-```python
-def _should_use_static_models(auth_manager) -> bool:
-    # API Key 在 ListAvailableModels 上 403 → 跳过, 用静态 fallback 模型
-    if auth_manager.auth_type == AuthType.API_KEY:
-        return True
-    return _is_runtime_endpoint(auth_manager)
-```
-
-- `load_credentials()`：新增 `type=api_key` 校验 + `account_id = api_key_{hash}`。
-- `_initialize_account()`：新增 api_key 构造分支；无 `profile_arn` 时记录警告。
-
-### 4.4 `main.py`
-
-`.env` 中的 `KIRO_API_KEY` 以最高优先级迁移到 `credentials.json`；`validate_configuration()` 接受 API Key 作为合法凭证。
+- 每个 Session Key = 一个账号，`account_id` 用哈希（不存原始 key）
+- 与 JSON/SQLite/refresh_token 账号混合编排
+- 账号初始化的判定标准是**认证成功**（`validate()` 为 True），而非是否能服务模型
 
 
 ---
 
-## 5. 兼容性
+## 4. 兼容性与边界
 
 ```mermaid
 flowchart LR
@@ -208,37 +143,24 @@ flowchart LR
     style SAFE fill:#90EE90
 ```
 
-| 现有能力 | 影响 |
-|----------|------|
-| 4 种现有认证 | ❌ 不受影响（新增 `elif` 分支） |
-| 多账号故障切换 | ✅ 增强（API Key 纳入账号池） |
-| 错误分类 / 调试日志 | ✅ 复用（403/402/429 通用；headers 不入日志） |
-
-**安全**：API Key 仅脱敏入日志；`account_id` 为哈希；`state.json` 不存原始 key。
-
----
-
-## 6. 测试策略
-
-| 层 | 覆盖 |
+| 项 | 说明 |
 |----|------|
-| 单元 | AuthType 检测优先级、host 路由到 q.amazonaws.com、永不过期、直传返回 key、profile 发现成功/空报错/已配置则跳过、force_refresh、脱敏、`_should_use_static_models`、config helper |
-| 单元 | account_manager：api_key 加载 / 确定性 ID / 缺字段跳过 / 多 key 独立 / 混合类型 / 显式 profile_arn 初始化 |
-| 集成 | 双 API Key 故障切换、单 API Key 加载 |
-
-全量：**1719 passed, 0 failed**。
+| 现有 4 种认证 | ❌ 不受影响（新增 `elif` 分支） |
+| 模型列表 | API_KEY 跳过 `ListAvailableModels`（403），用静态 fallback 模型 |
+| 安全 | Key 仅脱敏入日志；`account_id` 为哈希；不记录 Authorization 头 |
+| **能力边界** | Session Key **仅用于认证**；模型服务请使用携带模型权限的凭证（Kiro IDE JSON / refresh token / kiro-cli SQLite） |
 
 ---
 
-## 7. 结论
+## 5. 结论
 
 | 问题 | 答案 |
 |------|------|
-| 能否新增 API Key 凭证来源? | ✅ 能，已实现并测试 |
-| 传输协议? | ✅ 直传 Bearer 到 `q.{region}.amazonaws.com`（无交换） |
-| profileArn 如何获得? | ✅ 显式 `profile_arn`（主路径）；`ListAvailableProfiles` best-effort 自动发现 |
+| 能否新增 Session Key 作为凭证来源? | ✅ 能，作为**认证凭证**已实现并测试 |
+| 用途? | ✅ 仅**认证管理**（凭证鉴权） |
+| 协议? | ✅ 直传 Bearer → `q.{region}.amazonaws.com`，`ListAvailableProfiles` 200 校验 |
 | 与多账号融合度? | ✅ 每个 Key = 一个账号，复用全部编排能力 |
-| 是否兼容现有功能? | ✅ 纯增量，1719 测试零回归 |
-| `ksk_` 限制? | ⚠️ 会话密钥需显式 profile_arn；模型访问受 profile 门控 |
+| 是否兼容现有功能? | ✅ 纯增量，1722 测试零回归 |
+| 能否用它调模型? | ❌ 不能（平台限制）；本方案不做此尝试 |
 
-> 详细实施结果见 [`API_KEY_AUTH_POC_RESULT.md`](API_KEY_AUTH_POC_RESULT.md)。
+> 实施步骤与测试结果见 [`API_KEY_AUTH_POC_RESULT.md`](API_KEY_AUTH_POC_RESULT.md)。

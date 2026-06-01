@@ -1462,21 +1462,20 @@ class TestShouldUseStaticModels:
 
 class TestAccountManagerApiKeyInitialization:
     """
-    Tests for initializing an API-key account end-to-end (with explicit profile_arn),
-    verifying it skips ListAvailableModels and uses fallback models.
+    Tests for initializing a Kiro Session Key (API-key) account end-to-end:
+    it must validate authentication, skip ListAvailableModels, and use fallback models.
     """
 
     @pytest.mark.asyncio
-    async def test_api_key_account_init_with_explicit_profile_arn(self, tmp_path):
+    async def test_api_key_account_init_validates_and_uses_static_models(self, tmp_path):
         """
-        What it does: Initializes an api_key account that has an explicit profile_arn.
-        Purpose: Verify the primary working path - no discovery call, static models,
+        What it does: Initializes an api_key account; validate() succeeds (mocked 200).
+        Purpose: Verify the supported path - authenticate (validate) + static models,
                  no ListAvailableModels call (which would 403).
         """
         creds = [{
             "type": "api_key",
             "api_key": "ksk_init_test_key",
-            "profile_arn": "arn:aws:codewhisperer:us-east-1:111:profile/explicit",
         }]
         creds_file = tmp_path / "credentials.json"
         creds_file.write_text(json.dumps(creds))
@@ -1486,10 +1485,33 @@ class TestAccountManagerApiKeyInitialization:
         await manager.load_credentials()
 
         account_id = list(manager._accounts.keys())[0]
-        ok = await manager._initialize_account(account_id)
+
+        # validate() makes a network call (blocked in tests) -> mock it to succeed
+        with patch.object(KiroAuthManager, "validate", new=AsyncMock(return_value=True)):
+            ok = await manager._initialize_account(account_id)
 
         assert ok is True
         account = manager._accounts[account_id]
-        # Profile arn taken from config; static (fallback) models loaded
-        assert account.auth_manager.profile_arn == "arn:aws:codewhisperer:us-east-1:111:profile/explicit"
+        assert account.auth_manager.auth_type == AuthType.API_KEY
+        # Static (fallback) models loaded (ListAvailableModels skipped)
         assert len(account.model_resolver.get_available_models()) > 0
+
+    @pytest.mark.asyncio
+    async def test_api_key_account_init_fails_when_validation_fails(self, tmp_path):
+        """
+        What it does: Init fails when the Session Key fails authentication (validate False).
+        Purpose: Invalid/unauthenticated keys must not initialize.
+        """
+        creds = [{"type": "api_key", "api_key": "ksk_bad_key"}]
+        creds_file = tmp_path / "credentials.json"
+        creds_file.write_text(json.dumps(creds))
+        state_file = tmp_path / "state.json"
+
+        manager = AccountManager(str(creds_file), str(state_file))
+        await manager.load_credentials()
+        account_id = list(manager._accounts.keys())[0]
+
+        with patch.object(KiroAuthManager, "validate", new=AsyncMock(return_value=False)):
+            ok = await manager._initialize_account(account_id)
+
+        assert ok is False

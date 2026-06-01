@@ -536,13 +536,6 @@ class AccountManager:
                     api_region=creds_config.get("api_region")
                 )
             elif cred_type == "api_key":
-                if not creds_config.get("profile_arn"):
-                    logger.warning(
-                        f"API-key account {account_id} has no 'profile_arn' configured. "
-                        f"Will attempt auto-discovery via ListAvailableProfiles, which "
-                        f"typically returns empty for 'ksk_' session keys. If initialization "
-                        f"fails, set 'profile_arn' explicitly for this account."
-                    )
                 auth_manager = KiroAuthManager(
                     api_key=creds_config.get("api_key"),
                     profile_arn=creds_config.get("profile_arn"),
@@ -555,6 +548,17 @@ class AccountManager:
             
             # Get token to verify credentials
             token = await auth_manager.get_access_token()
+
+            # Kiro Session Key (API key) is an authentication-only credential.
+            # Verify it actually authenticates against Kiro's identity endpoint.
+            if auth_manager.auth_type == AuthType.API_KEY:
+                if not await auth_manager.validate():
+                    logger.error(
+                        f"API-key account {account_id}: Kiro Session Key failed "
+                        f"authentication validation (invalid or unauthenticated key)"
+                    )
+                    return False
+                logger.info(f"API-key account {account_id}: Session Key authenticated")
             
             # Determine if we should fetch models or use static list
             if _should_use_static_models(auth_manager):
