@@ -131,11 +131,12 @@ REFRESH_TOKEN: str = os.getenv("REFRESH_TOKEN", "")
 # Issued by the Kiro portal/console. When set, this is treated as a credential
 # source equivalent to a single account (see Account System).
 #
-# IMPORTANT (verified via protocol probing, see docs/zh/API_KEY_AUTH_POC_RESULT.md):
-# The raw API key (prefix "ksk_") is NOT accepted as a direct Bearer token by the
-# runtime endpoint. It must be exchanged for a short-lived access token first.
-# The exact exchange operation is not part of the public documentation yet, so the
-# exchange endpoint is configurable via KIRO_API_KEY_EXCHANGE_URL below.
+# Protocol (verified via official CLI binary analysis + live probing, see
+# docs/zh/API_KEY_AUTH_POC_RESULT.md):
+# The API key (prefix "ksk_") is used DIRECTLY as an HTTP Bearer token against the
+# AWS CodeWhisperer / Q Developer service endpoint (q.{region}.amazonaws.com),
+# NOT against runtime.kiro.dev. No token exchange is required. The profileArn is
+# discovered at runtime via the ListAvailableProfiles operation.
 KIRO_API_KEY: str = os.getenv("KIRO_API_KEY", "")
 
 # Profile ARN for AWS CodeWhisperer
@@ -186,18 +187,17 @@ KIRO_REFRESH_URL_TEMPLATE: str = "https://prod.{region}.auth.desktop.kiro.dev/re
 # URL for token refresh (AWS SSO OIDC - used by kiro-cli)
 AWS_SSO_OIDC_URL_TEMPLATE: str = "https://oidc.{region}.amazonaws.com/token"
 
-# URL for exchanging a Kiro API key (ksk_...) for a short-lived access token.
+# Service host for Kiro API-key authentication.
 #
-# Protocol note: verified probing shows the raw API key is NOT a direct Bearer
-# token for the runtime endpoint, so an exchange step is required. The exact
-# operation is not publicly documented yet; this template is therefore
-# overridable via the KIRO_API_KEY_EXCHANGE_URL environment variable so the
-# integration can be completed without code changes once the endpoint is known.
+# Verified protocol: the API key is a direct Bearer token for the AWS
+# CodeWhisperer / Q Developer service at q.{region}.amazonaws.com. This host is
+# used both for profileArn discovery (ListAvailableProfiles) and for
+# generateAssistantResponse when authenticating with an API key.
 #
-# Default points at the Kiro Desktop Auth host (same host used by /refreshToken).
-KIRO_API_KEY_EXCHANGE_URL_TEMPLATE: str = os.getenv(
-    "KIRO_API_KEY_EXCHANGE_URL",
-    "https://prod.{region}.auth.desktop.kiro.dev/apiKeyToken",
+# Overridable via KIRO_API_KEY_SERVICE_URL (may contain '{region}').
+KIRO_API_KEY_SERVICE_HOST_TEMPLATE: str = os.getenv(
+    "KIRO_API_KEY_SERVICE_URL",
+    "https://q.{region}.amazonaws.com",
 )
 
 # Host for main API (generateAssistantResponse)
@@ -595,15 +595,14 @@ def get_aws_sso_oidc_url(region: str) -> str:
     return AWS_SSO_OIDC_URL_TEMPLATE.format(region=region)
 
 
-# Whether the API-key exchange endpoint has been explicitly configured/confirmed.
-# When False, the gateway uses the (unverified) default endpoint and logs a warning.
-# Set KIRO_API_KEY_EXCHANGE_URL in the environment to mark it as confirmed.
-KIRO_API_KEY_EXCHANGE_CONFIRMED: bool = bool(os.getenv("KIRO_API_KEY_EXCHANGE_URL"))
+# Whether a custom API-key service host has been explicitly configured.
+# (Informational; the default q.{region}.amazonaws.com works out of the box.)
+KIRO_API_KEY_SERVICE_CONFIGURED: bool = bool(os.getenv("KIRO_API_KEY_SERVICE_URL"))
 
 
-def get_kiro_api_key_exchange_url(region: str) -> str:
-    """Return the API-key -> access-token exchange URL for the specified region."""
-    return KIRO_API_KEY_EXCHANGE_URL_TEMPLATE.format(region=region)
+def get_kiro_api_key_service_host(region: str) -> str:
+    """Return the CodeWhisperer/Q service host used for API-key authentication."""
+    return KIRO_API_KEY_SERVICE_HOST_TEMPLATE.format(region=region)
 
 
 def get_kiro_api_host(region: str) -> str:

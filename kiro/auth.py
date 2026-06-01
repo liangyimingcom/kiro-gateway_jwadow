@@ -47,8 +47,7 @@ from kiro.config import (
     get_kiro_api_host,
     get_kiro_q_host,
     get_aws_sso_oidc_url,
-    get_kiro_api_key_exchange_url,
-    KIRO_API_KEY_EXCHANGE_CONFIRMED,
+    get_kiro_api_key_service_host,
 )
 from kiro.utils import get_machine_fingerprint
 
@@ -81,10 +80,11 @@ class AuthType(Enum):
         - Requires clientId and clientSecret from credentials file
 
     API_KEY: Kiro headless / API-key authentication (Kiro Pro/Pro+/Power)
-        - The raw API key (prefix "ksk_") is exchanged for a short-lived access
-          token via the configured exchange endpoint (see config.KIRO_API_KEY_EXCHANGE_URL).
-        - Verified: the raw key is NOT accepted as a direct Bearer token by the
-          runtime endpoint, hence the exchange step.
+        - The API key (prefix "ksk_") is used DIRECTLY as an HTTP Bearer token
+          against the AWS CodeWhisperer / Q Developer service endpoint
+          (q.{region}.amazonaws.com). No token exchange is required.
+        - The profileArn is discovered at runtime via ListAvailableProfiles.
+        - Verified against the official Kiro CLI binary and live probing.
     """
     KIRO_DESKTOP = "kiro_desktop"
     AWS_SSO_OIDC = "aws_sso_oidc"
@@ -254,6 +254,15 @@ class KiroAuthManager:
         self._refresh_url = get_kiro_refresh_url(sso_region_for_oidc)
         self._api_host = get_kiro_api_host(final_api_region)
         self._q_host = get_kiro_q_host(final_api_region)
+
+        # API-key auth uses the AWS CodeWhisperer / Q Developer service endpoint
+        # (q.{region}.amazonaws.com) instead of runtime.kiro.dev. Verified protocol:
+        # the API key is a direct Bearer token for that service, and runtime.kiro.dev
+        # rejects API keys with 403 "bearer token invalid".
+        if self._auth_type == AuthType.API_KEY:
+            api_key_host = get_kiro_api_key_service_host(final_api_region)
+            self._api_host = api_key_host
+            self._q_host = api_key_host
         
         # Log initialized endpoints for diagnostics (helps with DNS issues like #58, #132, #133)
         logger.info(
@@ -680,6 +689,10 @@ class KiroAuthManager:
             True if the token expires within TOKEN_REFRESH_THRESHOLD seconds
             or if expiration time information is not available
         """
+        # API keys are long-lived credentials with no expiry to track.
+        if self._auth_type == AuthType.API_KEY:
+            return False
+
         if not self._expires_at:
             return True  # If no expiration info available, assume refresh is needed
         
@@ -712,87 +725,78 @@ class KiroAuthManager:
         Routes to appropriate refresh method based on auth type:
         - KIRO_DESKTOP: Uses Kiro Desktop Auth endpoint
         - AWS_SSO_OIDC: Uses AWS SSO OIDC endpoint
-        - API_KEY: Exchanges the API key for a short-lived access token
+        - API_KEY: No refresh needed (the API key is a long-lived Bearer token);
+                   this is a no-op for API keys.
         
         Raises:
             ValueError: If refresh token is not set or response doesn't contain accessToken
             httpx.HTTPError: On HTTP request error
         """
         if self._auth_type == AuthType.API_KEY:
-            await self._refresh_token_api_key()
+            # API keys are long-lived and used directly as Bearer tokens.
+            # There is nothing to refresh.
+            return
         elif self._auth_type == AuthType.AWS_SSO_OIDC:
             await self._refresh_token_aws_sso_oidc()
         else:
             await self._refresh_token_kiro_desktop()
 
-    async def _refresh_token_api_key(self) -> None:
+    async def _discover_profile_arn(self) -> None:
         """
-        Exchanges a Kiro API key (ksk_...) for a short-lived access token.
+        Discovers the profileArn for an API key via ListAvailableProfiles.
 
-        Protocol note (verified via live probing, 2026-05):
-        - The raw API key is NOT accepted as a direct Bearer token by the
-          runtime endpoint (`runtime.{region}.kiro.dev`), which returns
-          403 "The bearer token included in the request is invalid".
-        - Therefore an exchange step is required. The exact exchange operation
-          is not part of the public documentation yet, so the endpoint is
-          configurable via the KIRO_API_KEY_EXCHANGE_URL environment variable.
+        Verified protocol (official Kiro CLI binary + live probing):
+        - The API key is used directly as an HTTP Bearer token.
+        - The CodeWhisperer service operation
+          `AmazonCodeWhispererService.ListAvailableProfiles` returns the
+          profile(s) associated with the key's identity.
+        - The first profile's ARN is used (matching the CLI's lazy resolution).
 
-        When the exchange endpoint has not been explicitly confirmed
-        (KIRO_API_KEY_EXCHANGE_CONFIRMED is False), this method raises a clear,
-        actionable error instead of silently sending requests to an unverified
-        endpoint.
+        This is a no-op if a profileArn was already provided/discovered.
 
         Raises:
-            ValueError: If the API key is not set or the exchange endpoint is
-                        not confirmed, or the response lacks an access token.
+            ValueError: If the API key is not set, or no profiles are available
+                        for the key (e.g. the key has no provisioned subscription).
             httpx.HTTPError: On HTTP request error.
         """
         if not self._api_key:
             raise ValueError("API key is not set")
+        if self._profile_arn:
+            return  # Already known
 
-        if not KIRO_API_KEY_EXCHANGE_CONFIRMED:
-            raise ValueError(
-                "API key authentication requires a confirmed exchange endpoint. "
-                "The raw Kiro API key cannot be used directly as a Bearer token; "
-                "it must be exchanged for an access token. Set the KIRO_API_KEY_EXCHANGE_URL "
-                "environment variable to the verified exchange endpoint "
-                "(template may include '{region}'). "
-                "See docs/zh/API_KEY_AUTH_POC_RESULT.md for details."
-            )
-
-        sso_region = self._sso_region or self._region
-        url = get_kiro_api_key_exchange_url(sso_region)
-
-        logger.info(f"Exchanging Kiro API key for access token (key={_redact_secret(self._api_key)})...")
-
-        # Exchange request body. Field names follow the conventions used by the
-        # existing token endpoints; adjust if the confirmed endpoint differs.
-        payload = {"apiKey": self._api_key}
+        url = self._q_host  # q.{region}.amazonaws.com (set for API_KEY in __init__)
         headers = {
-            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/x-amz-json-1.0",
+            "x-amz-target": "AmazonCodeWhispererService.ListAvailableProfiles",
             "User-Agent": f"KiroIDE-0.7.45-{self._fingerprint}",
         }
 
+        logger.info(
+            f"Discovering profileArn via ListAvailableProfiles "
+            f"(key={_redact_secret(self._api_key)}, host={url})"
+        )
+
         async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.post(url, json=payload, headers=headers)
+            response = await client.post(url, json={"maxResults": 10}, headers=headers)
             response.raise_for_status()
             data = response.json()
 
-        new_access_token = data.get("accessToken") or data.get("access_token")
-        expires_in = data.get("expiresIn") or data.get("expires_in") or 3600
-        new_profile_arn = data.get("profileArn") or data.get("profile_arn")
+        profiles = data.get("profiles") or []
+        if not profiles:
+            raise ValueError(
+                "API key authenticated, but no profiles are available for it. "
+                "Ensure the API key's account has an active Kiro subscription "
+                "(Pro/Pro+/Power) and a provisioned profile. "
+                "You may also set PROFILE_ARN explicitly to bypass discovery."
+            )
 
-        if not new_access_token:
-            raise ValueError(f"API key exchange response does not contain accessToken: {data}")
+        arn = profiles[0].get("arn")
+        if not arn:
+            raise ValueError(f"ListAvailableProfiles returned a profile without 'arn': {profiles[0]}")
 
-        self._access_token = new_access_token
-        if new_profile_arn and not self._profile_arn:
-            self._profile_arn = new_profile_arn
-
-        # Apply expiration with a 60-second safety buffer
-        self._expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_in - 60)
-
-        logger.info(f"API key exchanged successfully, token expires: {self._expires_at.isoformat()}")
+        self._profile_arn = arn
+        logger.info(f"Discovered profileArn for API key: {arn}")
     
     async def _refresh_token_kiro_desktop(self) -> None:
         """
@@ -998,6 +1002,17 @@ class KiroAuthManager:
         Raises:
             ValueError: If unable to obtain access token
         """
+        # API_KEY auth: the key IS the Bearer token (no refresh/exchange).
+        # We discover the profileArn once (lazily) and then return the key directly.
+        if self._auth_type == AuthType.API_KEY:
+            if not self._api_key:
+                raise ValueError("API key is not set")
+            if not self._profile_arn:
+                async with self._lock:
+                    if not self._profile_arn:  # double-checked under lock
+                        await self._discover_profile_arn()
+            return self._api_key
+
         async with self._lock:
             # Token is valid and not expiring soon - just return it
             if self._access_token and not self.is_token_expiring_soon():
@@ -1055,6 +1070,14 @@ class KiroAuthManager:
         Returns:
             New access token
         """
+        # API_KEY: nothing to refresh; the key is the Bearer token. A 403 here
+        # means the key/profile is invalid, which the caller (failover logic)
+        # handles by classifying the error and trying the next account.
+        if self._auth_type == AuthType.API_KEY:
+            if not self._api_key:
+                raise ValueError("API key is not set")
+            return self._api_key
+
         async with self._lock:
             await self._refresh_token_request()
             return self._access_token

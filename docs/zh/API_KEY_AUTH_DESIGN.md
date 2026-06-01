@@ -77,18 +77,48 @@ flowchart TD
 **核心差异**：现有方式都是"用 refresh_token 换取短期 access_token 并定期刷新"，
 而 API Key 是**长期静态凭证**，认证模型大幅简化。
 
-### 2.3 待验证的技术细节（实现前需确认）
+### 2.3 传输协议（已通过 POC 实测验证 ✅）
 
-> ⚠️ 官方文档未公开 API Key 的具体传输协议，以下需在实现阶段通过抓包/测试确认：
+> 本节原为"待验证"，现已在 POC 阶段通过**官方 Kiro CLI 二进制分析 + 真实端点黑盒探测**得到确认。
+> 详细验证过程见 [`API_KEY_AUTH_POC_RESULT.md`](API_KEY_AUTH_POC_RESULT.md)。
 
-| 待验证项 | 可能性A | 可能性B |
-|----------|---------|---------|
-| Key 传输方式 | 直接作为 `Authorization: Bearer {key}` | 先用 Key 换取临时 access_token |
-| profileArn | 仍需提供 | API Key 已绑定，无需提供 |
-| 端点是否相同 | 复用 `runtime.{region}.kiro.dev` | 可能有专用端点 |
-| 区域处理 | 沿用现有 region 逻辑 | Key 内含区域信息 |
+#### 验证结论
 
-**设计原则**：方案需对上述两种可能性都保持**适配弹性**（见 §5.3）。
+| 维度 | 验证结果 |
+|------|----------|
+| Key 传输方式 | ✅ **直接作为 `Authorization: Bearer {ksk_key}`**（无需 exchange） |
+| 目标端点 | ✅ **`q.{region}.amazonaws.com`**（AWS CodeWhisperer/Q 服务），**非** `runtime.kiro.dev` |
+| profileArn | ✅ **仍需提供**，但可通过 `ListAvailableProfiles` **自动发现** |
+| 区域处理 | ✅ 沿用现有 region 逻辑（默认 us-east-1，可 override） |
+
+#### 关键证据
+
+```mermaid
+flowchart TD
+    K["ksk_ API Key"] --> EP{发往哪个端点?}
+    EP -->|"runtime.kiro.dev (IDE/desktop)"| R403["❌ 403 bearer token invalid"]
+    EP -->|"q.{region}.amazonaws.com (CodeWhisperer/Q)"| R200["✅ 接受 (无鉴权头→400 Missing bearer)"]
+
+    R200 --> LP["ListAvailableProfiles<br/>(x-amz-target, x-amz-json-1.0)"]
+    LP --> ARN["获取 profileArn"]
+    ARN --> GEN["generateAssistantResponse<br/>Bearer ksk_ + profileArn"]
+
+    style R403 fill:#ff6b6b
+    style R200 fill:#90EE90
+```
+
+**验证来源**：
+1. 官方 `kiro-cli` 二进制中存在 `api_client::profile::discover_endpoint_for_api_key`、
+   `GetProfile succeeded for API key`、`lazy resolution via list_available_profiles`、
+   `httpBearerAuth`、`x-amz-target: AmazonCodeWhispererService.ListAvailableProfiles`。
+2. 真实端点探测：`q.us-east-1.amazonaws.com` 在无 Authorization 头时返回
+   `400 Missing bearer token`，带 `ksk_` Bearer 时被接受（`ListAvailableProfiles → 200`）；
+   而 `runtime.kiro.dev` 对同一 Key 返回 `403 bearer token invalid`。
+
+> ⚠️ **此前推测中的"exchange 端点"假设已被推翻**：无需任何 token 交换步骤，
+> `ksk_` 本身就是 Bearer 凭证，只是必须发往 CodeWhisperer/Q 服务端点。
+>
+> 注：相关外部信息已按授权许可改写。
 
 
 ---
@@ -198,7 +228,7 @@ flowchart TD
 | 改动范围 | 🟢 小 | 集中在 `auth.py` + `account_manager.py` |
 | 破坏性风险 | 🟢 极低 | 纯新增分支，不修改现有路径 |
 | 测试成本 | 🟠 中 | 需覆盖单账号/多账号/混合场景 |
-| 不确定性 | 🟠 中 | API Key 传输协议需实测确认（§2.3） |
+| 不确定性 | 🟢 低 | API Key 传输协议已实测验证（§2.3），无遗留未知 |
 
 ### 4.3 与多账号系统的融合度分析
 
@@ -310,31 +340,35 @@ flowchart TD
 
 > **优先级**：`api_key` 检测应放在**最前面**，确保显式提供 Key 时优先采用。
 
-### 5.4 get_access_token() 的 API Key 分支
+### 5.4 get_access_token() 的 API Key 分支（已按验证结论定稿）
 
 ```mermaid
 flowchart TD
     GET["get_access_token()"] --> TYPE{auth_type?}
-    TYPE -->|API_KEY| DIRECT["直接返回 api_key<br/>(或缓存的已交换token)<br/>无需刷新"]
+    TYPE -->|API_KEY| HAVE{profileArn 已知?}
+    HAVE -->|否| DISC["_discover_profile_arn()<br/>ListAvailableProfiles @ q.{region}.amazonaws.com"]
+    HAVE -->|是| RETKEY
+    DISC --> RETKEY["直接返回 api_key 作为 Bearer<br/>(无 exchange, 无过期)"]
     TYPE -->|其他| EXISTING["现有逻辑:<br/>检查过期→刷新→返回"]
 
-    DIRECT --> RET["返回凭证"]
+    RETKEY --> RET["返回凭证"]
     EXISTING --> RET
 
-    style DIRECT fill:#90EE90
+    style RETKEY fill:#90EE90
+    style DISC fill:#90EE90
 ```
 
-**两种实现弹性**（对应 §2.3 待验证项）：
-- **可能性A（直传）**：`get_access_token()` 直接返回 `self._api_key`
-- **可能性B（交换）**：首次用 Key 换取 access_token 并缓存，过期后重新换取
+**已验证的实现（非弹性二选一）**：
+- `get_access_token()` **直接返回 `self._api_key`**（API Key 即 Bearer token，无交换）
+- 首次调用时若 `profileArn` 未知，则通过 `ListAvailableProfiles` 自动发现并缓存
+- API_KEY 认证的 `api_host`/`q_host` 被覆盖为 `q.{region}.amazonaws.com`
 
 ### 5.5 is_token_expiring_soon() 行为
 
 ```mermaid
 flowchart LR
     CHECK["is_token_expiring_soon()"] --> TYPE{API_KEY?}
-    TYPE -->|是, 直传模式| FALSE["返回 False<br/>(永不过期)"]
-    TYPE -->|是, 交换模式| NORMAL["按交换token过期时间判断"]
+    TYPE -->|是| FALSE["返回 False<br/>(API Key 永不过期)"]
     TYPE -->|否| EXISTING["现有逻辑"]
 
     style FALSE fill:#90EE90
@@ -353,8 +387,10 @@ flowchart LR
 # 新增：API Key 环境变量（用于 .env 单账号场景）
 KIRO_API_KEY: str = os.getenv("KIRO_API_KEY", "")
 
-# 如实测确认 API Key 走专用端点，则新增模板（否则复用现有 runtime 端点）
-# KIRO_API_KEY_ENDPOINT_TEMPLATE: str = "https://..."
+# API Key 服务端点（已验证）：直传 Bearer 到 q.{region}.amazonaws.com
+KIRO_API_KEY_SERVICE_HOST_TEMPLATE: str = os.getenv(
+    "KIRO_API_KEY_SERVICE_URL", "https://q.{region}.amazonaws.com"
+)
 ```
 
 ### 6.2 `auth.py`
@@ -379,20 +415,29 @@ class KiroAuthManager:
             self._auth_type = AuthType.KIRO_DESKTOP
 
     async def get_access_token(self) -> str:
-        if self._auth_type == AuthType.API_KEY:    # 新增分支
-            # 可能性A: 直传
+        if self._auth_type == AuthType.API_KEY:    # 已验证: 直传, 无 exchange
+            # API Key 本身就是 Bearer token; 首次调用懒发现 profileArn
+            if not self._profile_arn:
+                await self._discover_profile_arn()  # ListAvailableProfiles
             return self._api_key
-            # 可能性B: 交换并缓存(伪代码)
-            # if not self._access_token or self.is_token_expiring_soon():
-            #     await self._exchange_api_key_for_token()
-            # return self._access_token
         # ... 现有刷新逻辑保持不变 ...
 
+    async def _discover_profile_arn(self) -> None:
+        # POST q.{region}.amazonaws.com
+        #   Authorization: Bearer {api_key}
+        #   x-amz-target: AmazonCodeWhispererService.ListAvailableProfiles
+        #   Content-Type: application/x-amz-json-1.0
+        # 取 profiles[0].arn
+        ...
+
     def is_token_expiring_soon(self) -> bool:
-        if self._auth_type == AuthType.API_KEY and not self._exchange_mode:
-            return False                            # 永不过期
+        if self._auth_type == AuthType.API_KEY:
+            return False                            # API Key 永不过期
         # ... 现有逻辑 ...
 ```
+
+> 注：`__init__` 中当 `auth_type == API_KEY` 时，将 `api_host`/`q_host`
+> 覆盖为 `q.{region}.amazonaws.com`（CodeWhisperer/Q 服务端点）。
 
 ### 6.3 `account_manager.py`
 
@@ -481,23 +526,22 @@ flowchart TD
 |----------|-----------|----------|
 | JSON/SQLite/refresh_token 认证 | ❌ 不受影响 | 新增 `elif` 分支，不碰现有分支 |
 | Token 自动刷新 | ❌ 不受影响 | API_KEY 走独立分支 |
-| 403 force_refresh | ⚠️ 需适配 | API_KEY 模式下 force_refresh 应安全降级（无refresh则报错或重用Key） |
+| 403 force_refresh | ✅ 已适配 | API_KEY 模式下 force_refresh 直接返回 Key（无 exchange），失效则由失效切换处理 |
 | 多账号故障切换 | ✅ 增强 | API Key 账号自动纳入切换池 |
 | 单账号模式 | ❌ 不受影响 | API Key 单账号同样 bypass Circuit Breaker |
 | 错误分类(account_errors) | ✅ 复用 | 429/402/403 分类逻辑通用 |
 | 调试日志/脱敏 | ⚠️ 需注意 | 确保 api_key 不被明文记录 |
 
-### 7.3 force_refresh 的边界处理
+### 7.3 force_refresh 的边界处理（已验证）
 
 ```mermaid
 flowchart TD
     F403["收到 403"] --> FR["force_refresh()"]
     FR --> TYPE{auth_type?}
-    TYPE -->|API_KEY 直传模式| HANDLE["无可刷新内容<br/>→ 抛出明确错误<br/>(API Key 可能已失效)"]
-    TYPE -->|API_KEY 交换模式| REEXCHANGE["用 Key 重新换取 token"]
+    TYPE -->|API_KEY| HANDLE["无可刷新内容<br/>→ 直接返回 api_key<br/>(Key 即 Bearer, 无 exchange)"]
     TYPE -->|其他| EXISTING["现有刷新逻辑"]
 
-    HANDLE --> CLASSIFY["account_errors 归类<br/>403=RECOVERABLE→切换账号"]
+    HANDLE --> CLASSIFY["若 Key 已失效, 后续仍 403<br/>account_errors 归类<br/>403=RECOVERABLE→切换账号"]
 
     style HANDLE fill:#FFE4B5
 ```
@@ -566,7 +610,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    S0["阶段0: 实测确认<br/>API Key 传输协议(§2.3)"] --> S1
+    S0["阶段0: ✅ 已完成<br/>协议验证: 直传Bearer@q.amazonaws.com"] --> S1
     S1["阶段1: config.py<br/>+ KIRO_API_KEY"] --> S2
     S2["阶段2: auth.py<br/>+ AuthType.API_KEY + 分支"] --> S3
     S3["阶段3: account_manager.py<br/>+ type=api_key"] --> S4
@@ -606,7 +650,8 @@ flowchart TD
 | 是否兼容现有功能? | ✅ **纯增量变更，零破坏性** |
 | 与多账号融合度? | ✅ **极高，每个 Key = 一个账号，自动复用所有编排能力** |
 | 实现复杂度? | 🟢 **低**（API Key 是现有逻辑的简化子集，无需刷新） |
-| 主要不确定性? | 🟠 **API Key 传输协议需实测确认**（§2.3） |
+| 主要不确定性? | ✅ **已消除**：协议经 POC 实测验证 —— 直传 Bearer 到 `q.{region}.amazonaws.com` + `ListAvailableProfiles` 发现 profileArn（§2.3） |
+| 实现状态? | ✅ **已实现并测试**（1715 测试通过，零回归，见 `API_KEY_AUTH_POC_RESULT.md`） |
 
 ### 10.2 核心设计要点回顾
 
@@ -625,7 +670,7 @@ mindmap
       复用CircuitBreaker
       复用故障切换
     弹性设计
-      适配直传/交换两种协议
+      适配 q.amazonaws.com 服务端点
       force_refresh安全降级
     安全优先
       Key脱敏

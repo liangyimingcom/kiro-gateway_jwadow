@@ -4300,55 +4300,54 @@ class TestKiroAuthManagerApiKey:
         assert manager._api_key == "ksk_abcdef1234567890"
         assert manager.auth_type == AuthType.API_KEY
 
-    @pytest.mark.asyncio
-    async def test_exchange_raises_when_endpoint_not_confirmed(self, monkeypatch):
+    def test_api_key_uses_codewhisperer_service_host(self):
         """
-        What it does: Verifies a clear error when the exchange endpoint isn't confirmed.
-        Purpose: Avoid silently calling an unverified endpoint (verified finding:
-                 the raw key is NOT a direct Bearer token).
+        What it does: Verifies API_KEY auth routes to q.{region}.amazonaws.com.
+        Purpose: Ensure API keys use the CodeWhisperer/Q service endpoint, not
+                 runtime.kiro.dev (which rejects API keys).
         """
-        import kiro.auth as auth_mod
-        monkeypatch.setattr(auth_mod, "KIRO_API_KEY_EXCHANGE_CONFIRMED", False)
+        manager = KiroAuthManager(api_key="ksk_abcdef1234567890", region="us-east-1")
+        print(f"api_host={manager.api_host}, q_host={manager.q_host}")
+        assert "q.us-east-1.amazonaws.com" in manager.api_host
+        assert "q.us-east-1.amazonaws.com" in manager.q_host
+        assert "runtime" not in manager.api_host
 
+    def test_api_key_token_never_expiring(self):
+        """
+        What it does: Verifies API keys are treated as non-expiring.
+        Purpose: API keys are long-lived; is_token_expiring_soon must be False.
+        """
         manager = KiroAuthManager(api_key="ksk_abcdef1234567890")
-        with pytest.raises(ValueError) as exc_info:
-            await manager._refresh_token_api_key()
-
-        print(f"Error message: {exc_info.value}")
-        assert "exchange" in str(exc_info.value).lower()
+        assert manager.is_token_expiring_soon() is False
 
     @pytest.mark.asyncio
-    async def test_exchange_raises_when_no_api_key(self, monkeypatch):
+    async def test_get_access_token_returns_api_key_directly(self, monkeypatch):
         """
-        What it does: Verifies ValueError when api_key is missing but exchange called.
-        Purpose: Defensive guard.
+        What it does: Verifies get_access_token returns the API key as the Bearer token.
+        Purpose: Confirm no exchange; the key IS the token (profileArn pre-set to skip discovery).
         """
-        import kiro.auth as auth_mod
-        monkeypatch.setattr(auth_mod, "KIRO_API_KEY_EXCHANGE_CONFIRMED", True)
-
-        manager = KiroAuthManager(refresh_token="x")  # no api_key
-        manager._api_key = None
-        with pytest.raises(ValueError) as exc_info:
-            await manager._refresh_token_api_key()
-        assert "API key is not set" in str(exc_info.value)
+        manager = KiroAuthManager(
+            api_key="ksk_abcdef1234567890",
+            profile_arn="arn:aws:codewhisperer:us-east-1:111:profile/preset",
+        )
+        token = await manager.get_access_token()
+        assert token == "ksk_abcdef1234567890"
 
     @pytest.mark.asyncio
-    async def test_exchange_success_when_confirmed(self, monkeypatch):
+    async def test_discover_profile_arn_success(self):
         """
-        What it does: Verifies a successful API key exchange sets the access token.
-        Purpose: Ensure exchange parses accessToken/expiresIn/profileArn correctly.
+        What it does: Verifies profileArn discovery via ListAvailableProfiles.
+        Purpose: Ensure the first profile's arn is adopted.
         """
-        import kiro.auth as auth_mod
-        monkeypatch.setattr(auth_mod, "KIRO_API_KEY_EXCHANGE_CONFIRMED", True)
-
         manager = KiroAuthManager(api_key="ksk_abcdef1234567890")
 
         mock_response = AsyncMock()
         mock_response.status_code = 200
         mock_response.json = Mock(return_value={
-            "accessToken": "exchanged_access_token_xyz",
-            "expiresIn": 3600,
-            "profileArn": "arn:aws:codewhisperer:us-east-1:111:profile/from-key",
+            "profiles": [
+                {"arn": "arn:aws:codewhisperer:us-east-1:222:profile/discovered",
+                 "profileName": "default"}
+            ]
         })
         mock_response.raise_for_status = Mock()
 
@@ -4358,27 +4357,27 @@ class TestKiroAuthManagerApiKey:
         mock_client.__aexit__ = AsyncMock(return_value=None)
 
         with patch("kiro.auth.httpx.AsyncClient", return_value=mock_client):
-            await manager._refresh_token_api_key()
+            token = await manager.get_access_token()
 
-        print(f"Access token after exchange: {manager._access_token}")
-        assert manager._access_token == "exchanged_access_token_xyz"
-        assert manager.profile_arn == "arn:aws:codewhisperer:us-east-1:111:profile/from-key"
-        assert manager._expires_at is not None
+        assert token == "ksk_abcdef1234567890"
+        assert manager.profile_arn == "arn:aws:codewhisperer:us-east-1:222:profile/discovered"
+        # Verify the request targeted ListAvailableProfiles on the q service host
+        call = mock_client.post.call_args
+        assert "q.us-east-1.amazonaws.com" in call.args[0]
+        assert call.kwargs["headers"]["x-amz-target"] == "AmazonCodeWhispererService.ListAvailableProfiles"
+        assert call.kwargs["headers"]["Authorization"] == "Bearer ksk_abcdef1234567890"
 
     @pytest.mark.asyncio
-    async def test_exchange_missing_access_token_raises(self, monkeypatch):
+    async def test_discover_profile_arn_empty_raises(self):
         """
-        What it does: Verifies an error when the exchange response lacks accessToken.
-        Purpose: Defensive handling of malformed exchange responses.
+        What it does: Verifies a clear error when no profiles are available.
+        Purpose: Keys without a provisioned subscription must fail with guidance.
         """
-        import kiro.auth as auth_mod
-        monkeypatch.setattr(auth_mod, "KIRO_API_KEY_EXCHANGE_CONFIRMED", True)
-
         manager = KiroAuthManager(api_key="ksk_abcdef1234567890")
 
         mock_response = AsyncMock()
         mock_response.status_code = 200
-        mock_response.json = Mock(return_value={"somethingElse": "value"})
+        mock_response.json = Mock(return_value={"profiles": []})
         mock_response.raise_for_status = Mock()
 
         mock_client = AsyncMock()
@@ -4388,9 +4387,40 @@ class TestKiroAuthManagerApiKey:
 
         with patch("kiro.auth.httpx.AsyncClient", return_value=mock_client):
             with pytest.raises(ValueError) as exc_info:
-                await manager._refresh_token_api_key()
+                await manager.get_access_token()
 
-        assert "accessToken" in str(exc_info.value)
+        assert "no profiles" in str(exc_info.value).lower()
+
+    @pytest.mark.asyncio
+    async def test_discover_profile_arn_skipped_when_preset(self):
+        """
+        What it does: Verifies discovery is skipped if profileArn already known.
+        Purpose: Avoid an unnecessary network call when PROFILE_ARN is configured.
+        """
+        manager = KiroAuthManager(
+            api_key="ksk_abcdef1234567890",
+            profile_arn="arn:aws:codewhisperer:us-east-1:111:profile/preset",
+        )
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("kiro.auth.httpx.AsyncClient", return_value=mock_client):
+            await manager.get_access_token()
+
+        mock_client.post.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_force_refresh_returns_api_key(self):
+        """
+        What it does: Verifies force_refresh returns the API key (no exchange).
+        Purpose: On 403, force_refresh must not crash; failover handles invalid keys.
+        """
+        manager = KiroAuthManager(api_key="ksk_abcdef1234567890")
+        token = await manager.force_refresh()
+        assert token == "ksk_abcdef1234567890"
 
 
 class TestRedactSecret:
