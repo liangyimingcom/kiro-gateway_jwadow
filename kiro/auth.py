@@ -47,6 +47,7 @@ from kiro.config import (
     get_kiro_api_host,
     get_kiro_q_host,
     get_aws_sso_oidc_url,
+    get_kiro_api_key_service_host,
 )
 from kiro.utils import get_machine_fingerprint
 
@@ -77,9 +78,37 @@ class AuthType(Enum):
         - Uses https://oidc.{region}.amazonaws.com/token
         - Form body: grant_type=refresh_token&client_id=...&client_secret=...&refresh_token=...
         - Requires clientId and clientSecret from credentials file
+
+    API_KEY: Kiro Session Key authentication (created on the Kiro website)
+        - The key (prefix "ksk_") is an AUTHENTICATION-ONLY credential: it confirms
+          identity but does not, by itself, grant model-serving access.
+        - Used directly as an HTTP Bearer token against the AWS CodeWhisperer / Q
+          Developer identity endpoint (q.{region}.amazonaws.com).
+        - Validity is checked via validate() (ListAvailableProfiles -> HTTP 200).
+        - No token exchange and no expiry.
     """
     KIRO_DESKTOP = "kiro_desktop"
     AWS_SSO_OIDC = "aws_sso_oidc"
+    API_KEY = "api_key"
+
+
+def _redact_secret(secret: Optional[str]) -> str:
+    """
+    Redacts a secret for safe logging.
+
+    Shows only a short prefix so logs remain useful for debugging without
+    leaking the full credential.
+
+    Args:
+        secret: The secret string (API key, token, etc.) or None
+
+    Returns:
+        Redacted representation, e.g. "ksk_abc1...<redacted>" or "<none>"
+    """
+    if not secret:
+        return "<none>"
+    prefix = secret[:8]
+    return f"{prefix}...<redacted len={len(secret)}>"
 
 
 class KiroAuthManager:
@@ -126,6 +155,7 @@ class KiroAuthManager:
         client_secret: Optional[str] = None,
         sqlite_db: Optional[str] = None,
         api_region: Optional[str] = None,
+        api_key: Optional[str] = None,
     ):
         """
         Initializes the authentication manager.
@@ -141,12 +171,16 @@ class KiroAuthManager:
                        Default location: ~/.local/share/kiro-cli/data.sqlite3
             api_region: Q API region override (optional, per-account)
                        If not specified, uses auto-detection or falls back to region
+            api_key: Kiro API key (prefix "ksk_") for headless/API-key auth (optional).
+                       When provided, auth_type is forced to API_KEY and the key is
+                       exchanged for a short-lived access token on demand.
         """
         self._refresh_token = refresh_token
         self._profile_arn = profile_arn
         self._region = region
         self._creds_file = creds_file
         self._sqlite_db = sqlite_db
+        self._api_key = api_key
         
         # AWS SSO OIDC specific fields
         self._client_id: Optional[str] = client_id
@@ -221,6 +255,15 @@ class KiroAuthManager:
         self._refresh_url = get_kiro_refresh_url(sso_region_for_oidc)
         self._api_host = get_kiro_api_host(final_api_region)
         self._q_host = get_kiro_q_host(final_api_region)
+
+        # API-key auth uses the AWS CodeWhisperer / Q Developer service endpoint
+        # (q.{region}.amazonaws.com) instead of runtime.kiro.dev. Verified protocol:
+        # the API key is a direct Bearer token for that service, and runtime.kiro.dev
+        # rejects API keys with 403 "bearer token invalid".
+        if self._auth_type == AuthType.API_KEY:
+            api_key_host = get_kiro_api_key_service_host(final_api_region)
+            self._api_host = api_key_host
+            self._q_host = api_key_host
         
         # Log initialized endpoints for diagnostics (helps with DNS issues like #58, #132, #133)
         logger.info(
@@ -234,11 +277,19 @@ class KiroAuthManager:
     def _detect_auth_type(self) -> None:
         """
         Detects authentication type based on available credentials.
-        
+
+        Priority:
+        1. API_KEY      - if an explicit API key was provided (highest priority)
+        2. AWS_SSO_OIDC - if clientId and clientSecret are present
+        3. KIRO_DESKTOP - default fallback
+
         AWS SSO OIDC credentials contain clientId and clientSecret.
         Kiro Desktop credentials do not contain these fields.
         """
-        if self._client_id and self._client_secret:
+        if self._api_key:
+            self._auth_type = AuthType.API_KEY
+            logger.info(f"Detected auth type: API_KEY (key={_redact_secret(self._api_key)})")
+        elif self._client_id and self._client_secret:
             self._auth_type = AuthType.AWS_SSO_OIDC
             logger.info("Detected auth type: AWS SSO OIDC (kiro-cli)")
         else:
@@ -639,6 +690,10 @@ class KiroAuthManager:
             True if the token expires within TOKEN_REFRESH_THRESHOLD seconds
             or if expiration time information is not available
         """
+        # API keys are long-lived credentials with no expiry to track.
+        if self._auth_type == AuthType.API_KEY:
+            return False
+
         if not self._expires_at:
             return True  # If no expiration info available, assume refresh is needed
         
@@ -671,15 +726,81 @@ class KiroAuthManager:
         Routes to appropriate refresh method based on auth type:
         - KIRO_DESKTOP: Uses Kiro Desktop Auth endpoint
         - AWS_SSO_OIDC: Uses AWS SSO OIDC endpoint
+        - API_KEY: No refresh needed (the API key is a long-lived Bearer token);
+                   this is a no-op for API keys.
         
         Raises:
             ValueError: If refresh token is not set or response doesn't contain accessToken
             httpx.HTTPError: On HTTP request error
         """
-        if self._auth_type == AuthType.AWS_SSO_OIDC:
+        if self._auth_type == AuthType.API_KEY:
+            # API keys are long-lived and used directly as Bearer tokens.
+            # There is nothing to refresh.
+            return
+        elif self._auth_type == AuthType.AWS_SSO_OIDC:
             await self._refresh_token_aws_sso_oidc()
         else:
             await self._refresh_token_kiro_desktop()
+
+    async def validate(self) -> bool:
+        """
+        Validates that the Kiro Session Key (API key) is a live, authenticated credential.
+
+        Kiro Session Keys (prefix "ksk_", created on the Kiro website) are
+        authentication-only credentials: they confirm identity but do not, by
+        themselves, grant model-serving access. This method calls the lightweight
+        identity operation `AmazonCodeWhispererService.ListAvailableProfiles`:
+
+        - HTTP 200  -> the key authenticates successfully (valid credential),
+                       regardless of whether any model-serving profile is provisioned.
+        - HTTP 401/403 (or other) -> the key is invalid / not authenticated.
+
+        As a best-effort convenience, if the response happens to include a profile,
+        its ARN is adopted (so accounts that DO have a provisioned profile benefit),
+        but an empty profile list does NOT make the key invalid.
+
+        Returns:
+            True if the key authenticates (HTTP 200), False otherwise.
+        """
+        if self._auth_type != AuthType.API_KEY or not self._api_key:
+            return False
+
+        url = self._q_host  # q.{region}.amazonaws.com (set for API_KEY in __init__)
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/x-amz-json-1.0",
+            "x-amz-target": "AmazonCodeWhispererService.ListAvailableProfiles",
+            "User-Agent": f"KiroIDE-0.7.45-{self._fingerprint}",
+        }
+
+        logger.info(
+            f"Validating Kiro Session Key (key={_redact_secret(self._api_key)}, host={url})"
+        )
+
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.post(url, json={"maxResults": 10}, headers=headers)
+        except Exception as e:
+            logger.warning(f"Session key validation request failed: {type(e).__name__}: {e}")
+            return False
+
+        if response.status_code == 200:
+            # Best-effort: adopt a profile ARN if the account happens to have one.
+            try:
+                profiles = response.json().get("profiles") or []
+                if profiles and not self._profile_arn:
+                    self._profile_arn = profiles[0].get("arn")
+                    logger.info(f"Session key has a provisioned profile: {self._profile_arn}")
+            except Exception:
+                pass
+            logger.info("Kiro Session Key authenticated successfully (valid credential)")
+            return True
+
+        logger.warning(
+            f"Kiro Session Key authentication failed: HTTP {response.status_code} "
+            f"{response.text[:200]!r}"
+        )
+        return False
     
     async def _refresh_token_kiro_desktop(self) -> None:
         """
@@ -885,6 +1006,15 @@ class KiroAuthManager:
         Raises:
             ValueError: If unable to obtain access token
         """
+        # API_KEY auth (Kiro Session Key): the key IS the Bearer credential.
+        # Session keys are authentication-only; there is nothing to refresh and
+        # no profile to resolve here. Return the key directly. Validity is checked
+        # separately via validate() (see _initialize_account).
+        if self._auth_type == AuthType.API_KEY:
+            if not self._api_key:
+                raise ValueError("API key is not set")
+            return self._api_key
+
         async with self._lock:
             # Token is valid and not expiring soon - just return it
             if self._access_token and not self.is_token_expiring_soon():
@@ -942,6 +1072,14 @@ class KiroAuthManager:
         Returns:
             New access token
         """
+        # API_KEY: nothing to refresh; the key is the Bearer token. A 403 here
+        # means the key/profile is invalid, which the caller (failover logic)
+        # handles by classifying the error and trying the next account.
+        if self._auth_type == AuthType.API_KEY:
+            if not self._api_key:
+                raise ValueError("API key is not set")
+            return self._api_key
+
         async with self._lock:
             await self._refresh_token_request()
             return self._access_token
@@ -973,5 +1111,5 @@ class KiroAuthManager:
     
     @property
     def auth_type(self) -> AuthType:
-        """Authentication type (KIRO_DESKTOP or AWS_SSO_OIDC)."""
+        """Authentication type (KIRO_DESKTOP, AWS_SSO_OIDC, or API_KEY)."""
         return self._auth_type

@@ -511,7 +511,7 @@ class TestAuthTypeEnum:
     def test_auth_type_enum_values(self):
         """
         What it does: Verifies AuthType enum values.
-        Purpose: Ensure enum contains KIRO_DESKTOP and AWS_SSO_OIDC.
+        Purpose: Ensure enum contains KIRO_DESKTOP, AWS_SSO_OIDC and API_KEY.
         """
         print("Verification: AuthType contains KIRO_DESKTOP...")
         assert AuthType.KIRO_DESKTOP.value == "kiro_desktop"
@@ -519,8 +519,11 @@ class TestAuthTypeEnum:
         print("Verification: AuthType contains AWS_SSO_OIDC...")
         assert AuthType.AWS_SSO_OIDC.value == "aws_sso_oidc"
         
-        print(f"Comparing value count: Expected 2, Got {len(AuthType)}")
-        assert len(AuthType) == 2
+        print("Verification: AuthType contains API_KEY...")
+        assert AuthType.API_KEY.value == "api_key"
+        
+        print(f"Comparing value count: Expected 3, Got {len(AuthType)}")
+        assert len(AuthType) == 3
 
 
 # =============================================================================
@@ -4251,3 +4254,227 @@ class TestAPIRegionPriorityHierarchy:
         print(f"Result: api_host={manager5._api_host}")
         assert "ap-south-1" in manager5._api_host
 
+
+
+
+# =============================================================================
+# Tests for API_KEY authentication (Authenticate with an API key)
+# =============================================================================
+
+class TestKiroAuthManagerApiKeyDetection:
+    """Tests for API_KEY auth type detection priority."""
+
+    def test_detect_auth_type_api_key_takes_priority(self):
+        """
+        What it does: Verifies API_KEY detection wins even when other creds exist.
+        Purpose: Ensure an explicit api_key forces API_KEY auth (highest priority).
+        """
+        print("Setup: Creating KiroAuthManager with api_key + client credentials...")
+        manager = KiroAuthManager(
+            api_key="ksk_test_key_123456",
+            refresh_token="test_token",
+            client_id="test_client_id",
+            client_secret="test_client_secret",
+        )
+        print(f"Comparing auth_type: Expected API_KEY, Got {manager.auth_type}")
+        assert manager.auth_type == AuthType.API_KEY
+
+    def test_detect_auth_type_api_key_only(self):
+        """
+        What it does: Verifies API_KEY detection with only an api_key.
+        Purpose: Ensure api_key alone selects API_KEY auth.
+        """
+        manager = KiroAuthManager(api_key="ksk_test_key_123456")
+        assert manager.auth_type == AuthType.API_KEY
+
+
+class TestKiroAuthManagerApiKey:
+    """Tests for the API_KEY credential source (Kiro Session Key, authentication-only)."""
+
+    def test_api_key_stored_on_init(self):
+        """
+        What it does: Verifies the api_key is stored on the instance.
+        Purpose: Ensure the constructor accepts and keeps the api_key.
+        """
+        manager = KiroAuthManager(api_key="ksk_abcdef1234567890")
+        assert manager._api_key == "ksk_abcdef1234567890"
+        assert manager.auth_type == AuthType.API_KEY
+
+    def test_api_key_uses_codewhisperer_service_host(self):
+        """
+        What it does: Verifies API_KEY auth routes to q.{region}.amazonaws.com.
+        Purpose: Ensure Session Keys use the CodeWhisperer/Q identity endpoint, not
+                 runtime.kiro.dev.
+        """
+        manager = KiroAuthManager(api_key="ksk_abcdef1234567890", region="us-east-1")
+        print(f"api_host={manager.api_host}, q_host={manager.q_host}")
+        assert "q.us-east-1.amazonaws.com" in manager.api_host
+        assert "q.us-east-1.amazonaws.com" in manager.q_host
+        assert "runtime" not in manager.api_host
+
+    def test_api_key_token_never_expiring(self):
+        """
+        What it does: Verifies Session Keys are treated as non-expiring.
+        Purpose: Session Keys are long-lived; is_token_expiring_soon must be False.
+        """
+        manager = KiroAuthManager(api_key="ksk_abcdef1234567890")
+        assert manager.is_token_expiring_soon() is False
+
+    @pytest.mark.asyncio
+    async def test_get_access_token_returns_api_key_directly_no_network(self):
+        """
+        What it does: get_access_token returns the key directly with NO network call.
+        Purpose: Session Key IS the Bearer credential; no exchange, no profile discovery.
+        """
+        manager = KiroAuthManager(api_key="ksk_abcdef1234567890")
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("kiro.auth.httpx.AsyncClient", return_value=mock_client):
+            token = await manager.get_access_token()
+
+        assert token == "ksk_abcdef1234567890"
+        mock_client.post.assert_not_called()  # get_access_token must not hit the network
+
+    @pytest.mark.asyncio
+    async def test_validate_returns_true_on_http_200(self):
+        """
+        What it does: validate() returns True when the identity endpoint returns 200.
+        Purpose: A 200 means the Session Key authenticates (valid credential),
+                 even if the profiles list is empty.
+        """
+        manager = KiroAuthManager(api_key="ksk_abcdef1234567890")
+
+        mock_response = AsyncMock()
+        mock_response.status_code = 200
+        mock_response.json = Mock(return_value={"profiles": []})  # empty is still valid auth
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("kiro.auth.httpx.AsyncClient", return_value=mock_client):
+            ok = await manager.validate()
+
+        assert ok is True
+        # Verify it called ListAvailableProfiles on q.amazonaws.com with the key
+        call = mock_client.post.call_args
+        assert "q.us-east-1.amazonaws.com" in call.args[0]
+        assert call.kwargs["headers"]["x-amz-target"] == "AmazonCodeWhispererService.ListAvailableProfiles"
+        assert call.kwargs["headers"]["Authorization"] == "Bearer ksk_abcdef1234567890"
+
+    @pytest.mark.asyncio
+    async def test_validate_adopts_profile_arn_if_present(self):
+        """
+        What it does: validate() best-effort adopts a profile ARN if the account has one.
+        Purpose: Accounts that DO have a provisioned profile benefit automatically.
+        """
+        manager = KiroAuthManager(api_key="ksk_abcdef1234567890")
+
+        mock_response = AsyncMock()
+        mock_response.status_code = 200
+        mock_response.json = Mock(return_value={
+            "profiles": [{"arn": "arn:aws:codewhisperer:us-east-1:222:profile/p1"}]
+        })
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("kiro.auth.httpx.AsyncClient", return_value=mock_client):
+            ok = await manager.validate()
+
+        assert ok is True
+        assert manager.profile_arn == "arn:aws:codewhisperer:us-east-1:222:profile/p1"
+
+    @pytest.mark.asyncio
+    async def test_validate_returns_false_on_403(self):
+        """
+        What it does: validate() returns False on 403 (invalid/unauthenticated key).
+        Purpose: Distinguish a live credential from an invalid one.
+        """
+        manager = KiroAuthManager(api_key="ksk_invalid_key")
+
+        mock_response = AsyncMock()
+        mock_response.status_code = 403
+        mock_response.text = '{"message":"AccessDenied"}'
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("kiro.auth.httpx.AsyncClient", return_value=mock_client):
+            ok = await manager.validate()
+
+        assert ok is False
+
+    @pytest.mark.asyncio
+    async def test_validate_returns_false_on_network_error(self):
+        """
+        What it does: validate() returns False (no crash) on network error.
+        Purpose: Robust handling; account init fails gracefully.
+        """
+        manager = KiroAuthManager(api_key="ksk_abcdef1234567890")
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(side_effect=httpx.ConnectError("boom"))
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("kiro.auth.httpx.AsyncClient", return_value=mock_client):
+            ok = await manager.validate()
+
+        assert ok is False
+
+    @pytest.mark.asyncio
+    async def test_validate_false_when_not_api_key_auth(self):
+        """
+        What it does: validate() returns False for non-API_KEY auth types.
+        Purpose: validate() is specific to Session Keys.
+        """
+        manager = KiroAuthManager(refresh_token="some_token")
+        assert manager.auth_type != AuthType.API_KEY
+        ok = await manager.validate()
+        assert ok is False
+
+    @pytest.mark.asyncio
+    async def test_force_refresh_returns_api_key(self):
+        """
+        What it does: Verifies force_refresh returns the Session Key (no exchange).
+        Purpose: On 403, force_refresh must not crash; failover handles invalid keys.
+        """
+        manager = KiroAuthManager(api_key="ksk_abcdef1234567890")
+        token = await manager.force_refresh()
+        assert token == "ksk_abcdef1234567890"
+
+
+class TestRedactSecret:
+    """Tests for the _redact_secret() logging-safety helper."""
+
+    def test_redact_secret_does_not_expose_full_key(self):
+        """
+        What it does: Verifies _redact_secret only reveals a short prefix.
+        Purpose: Ensure API keys are never fully exposed in logs.
+        """
+        from kiro.auth import _redact_secret
+
+        redacted = _redact_secret("ksk_supersecretvalue_should_not_appear")
+        print(f"Redacted: {redacted}")
+        assert "should_not_appear" not in redacted
+        assert redacted.startswith("ksk_")
+
+    def test_redact_secret_handles_empty_and_none(self):
+        """
+        What it does: Verifies _redact_secret handles empty/None safely.
+        Purpose: Avoid crashes when no secret is present.
+        """
+        from kiro.auth import _redact_secret
+
+        assert _redact_secret("") == "<none>"
+        assert _redact_secret(None) == "<none>"

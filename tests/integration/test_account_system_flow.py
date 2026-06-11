@@ -495,3 +495,119 @@ class TestAccountSystemFullFlow:
         assert refresh_called is True
         assert account.models_cached_at > original_cached_at
         print("✓ Cache was refreshed on usage when TTL expired")
+
+
+
+# =============================================================================
+# Integration Tests: API Key credential source in the Account System
+# =============================================================================
+
+class TestApiKeyAccountSystemFlow:
+    """
+    Integration tests verifying that API-key accounts participate in the
+    multi-account failover system exactly like other credential types.
+
+    "Each API key = one account."
+    """
+
+    async def _mock_init(self, manager, mock_models):
+        """Install a mocked _initialize_account that wires up fake components."""
+        import time as _time
+        from kiro.auth import KiroAuthManager
+        from kiro.cache import ModelInfoCache
+        from kiro.model_resolver import ModelResolver
+        from kiro.account_manager import ModelAccountList
+
+        async def mock_initialize(account_id):
+            account = manager._accounts[account_id]
+            auth_manager = MagicMock(spec=KiroAuthManager)
+            auth_manager._access_token = f"token_{account_id}"
+            auth_manager.q_host = "https://api.example.com"
+            auth_manager.api_host = "https://api.example.com"
+
+            model_cache = ModelInfoCache()
+            await model_cache.update(mock_models)
+            model_resolver = ModelResolver(
+                cache=model_cache, hidden_models={}, aliases={}, hidden_from_list=set()
+            )
+            account.auth_manager = auth_manager
+            account.model_cache = model_cache
+            account.model_resolver = model_resolver
+            account.models_cached_at = _time.time()
+            for model in model_resolver.get_available_models():
+                if model not in manager._model_to_accounts:
+                    manager._model_to_accounts[model] = ModelAccountList()
+                if account_id not in manager._model_to_accounts[model].accounts:
+                    manager._model_to_accounts[model].accounts.append(account_id)
+            return True
+
+        return mock_initialize
+
+    @pytest.mark.asyncio
+    async def test_two_api_keys_failover(self, tmp_path, mock_list_models_response):
+        """
+        What it does: Two api_key accounts; first fails (RECOVERABLE), second is used.
+        Purpose: Verify API-key accounts integrate with the failover loop.
+        """
+        print("\n=== Test: API key failover between two keys ===")
+        creds_file = tmp_path / "credentials.json"
+        state_file = tmp_path / "state.json"
+        credentials = [
+            {"type": "api_key", "api_key": "ksk_integration_key_one"},
+            {"type": "api_key", "api_key": "ksk_integration_key_two"},
+        ]
+        creds_file.write_text(json.dumps(credentials))
+
+        manager = AccountManager(str(creds_file), str(state_file))
+        await manager.load_credentials()
+        await manager.load_state()
+
+        assert len(manager._accounts) == 2
+        assert all(aid.startswith("api_key_") for aid in manager._accounts)
+
+        mock_initialize = await self._mock_init(manager, mock_list_models_response["models"])
+        with patch.object(manager, "_initialize_account", side_effect=mock_initialize):
+            for account_id in list(manager._accounts.keys()):
+                await manager._initialize_account(account_id)
+
+        # First account fails with a RECOVERABLE error (e.g. 429 rate limit)
+        first_id = list(manager._accounts.keys())[0]
+        await manager.report_failure(
+            first_id, "claude-sonnet-4.5", ErrorType.RECOVERABLE, 429, None
+        )
+
+        # get_next_account should return the OTHER account when first is excluded
+        next_account = await manager.get_next_account(
+            "claude-sonnet-4.5", exclude_accounts={first_id}
+        )
+        print(f"Failover selected: {next_account.id if next_account else None}")
+        assert next_account is not None
+        assert next_account.id != first_id
+
+    @pytest.mark.asyncio
+    async def test_single_api_key_account_loads(self, tmp_path, mock_list_models_response):
+        """
+        What it does: A single api_key account loads and initializes.
+        Purpose: Verify single API-key setup works (no failover needed).
+        """
+        creds_file = tmp_path / "credentials.json"
+        state_file = tmp_path / "state.json"
+        creds_file.write_text(json.dumps(
+            [{"type": "api_key", "api_key": "ksk_single_integration_key"}]
+        ))
+
+        manager = AccountManager(str(creds_file), str(state_file))
+        await manager.load_credentials()
+        await manager.load_state()
+
+        assert len(manager._accounts) == 1
+        account_id = list(manager._accounts.keys())[0]
+
+        mock_initialize = await self._mock_init(manager, mock_list_models_response["models"])
+        with patch.object(manager, "_initialize_account", side_effect=mock_initialize):
+            ok = await manager._initialize_account(account_id)
+        assert ok is True
+
+        account = await manager.get_next_account("claude-sonnet-4.5")
+        assert account is not None
+        assert account.id == account_id

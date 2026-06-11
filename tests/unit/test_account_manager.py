@@ -1300,3 +1300,218 @@ class TestFormatDuration:
         """Test formatting days."""
         assert _format_duration(86400) == "1d"
         assert _format_duration(172800) == "2d"
+
+
+
+class TestAccountManagerApiKeyType:
+    """
+    Tests for AccountManager handling of the api_key credential type.
+
+    Verifies that each API key is treated as a distinct account and integrates
+    with the multi-account system (stable, hashed account_id; raw key not stored
+    as identifier).
+    """
+
+    @pytest.mark.asyncio
+    async def test_load_credentials_api_key_type(self, tmp_path):
+        """
+        What it does: Loads credentials with type=api_key.
+        Purpose: Verify api_key entries become accounts with hashed IDs.
+        """
+        print("\n=== Test: load_credentials with type=api_key ===")
+        creds = [
+            {"type": "api_key", "api_key": "ksk_test_key_aaaaaaaaaaaa"}
+        ]
+        creds_file = tmp_path / "credentials.json"
+        creds_file.write_text(json.dumps(creds))
+        state_file = tmp_path / "state.json"
+
+        manager = AccountManager(str(creds_file), str(state_file))
+        await manager.load_credentials()
+
+        assert len(manager._accounts) == 1
+        account_id = list(manager._accounts.keys())[0]
+        print(f"account_id = {account_id}")
+        assert account_id.startswith("api_key_")
+        # The raw key must NOT appear in the account id
+        assert "ksk_test_key_aaaaaaaaaaaa" not in account_id
+
+    @pytest.mark.asyncio
+    async def test_load_credentials_api_key_deterministic_id(self, tmp_path):
+        """
+        What it does: Same api_key yields the same account_id across loads.
+        Purpose: Verify deterministic hashing (stable across restarts).
+        """
+        creds = [{"type": "api_key", "api_key": "ksk_same_key_value_123"}]
+        creds_file = tmp_path / "credentials.json"
+        creds_file.write_text(json.dumps(creds))
+        state_file = tmp_path / "state.json"
+
+        m1 = AccountManager(str(creds_file), str(state_file))
+        await m1.load_credentials()
+        m2 = AccountManager(str(creds_file), str(state_file))
+        await m2.load_credentials()
+
+        assert list(m1._accounts.keys()) == list(m2._accounts.keys())
+
+    @pytest.mark.asyncio
+    async def test_load_credentials_api_key_missing_field_skipped(self, tmp_path):
+        """
+        What it does: Entries with type=api_key but no api_key are skipped.
+        Purpose: Verify validation rejects incomplete api_key entries.
+        """
+        creds = [
+            {"type": "api_key"},  # missing api_key -> skipped
+            {"type": "api_key", "api_key": "ksk_valid_key_xyz"},  # valid
+        ]
+        creds_file = tmp_path / "credentials.json"
+        creds_file.write_text(json.dumps(creds))
+        state_file = tmp_path / "state.json"
+
+        manager = AccountManager(str(creds_file), str(state_file))
+        await manager.load_credentials()
+
+        assert len(manager._accounts) == 1
+
+    @pytest.mark.asyncio
+    async def test_load_credentials_multiple_api_keys_distinct_accounts(self, tmp_path):
+        """
+        What it does: Two different api_keys create two distinct accounts.
+        Purpose: Verify "each API key = one account" for multi-account failover.
+        """
+        creds = [
+            {"type": "api_key", "api_key": "ksk_key_one_111"},
+            {"type": "api_key", "api_key": "ksk_key_two_222"},
+        ]
+        creds_file = tmp_path / "credentials.json"
+        creds_file.write_text(json.dumps(creds))
+        state_file = tmp_path / "state.json"
+
+        manager = AccountManager(str(creds_file), str(state_file))
+        await manager.load_credentials()
+
+        assert len(manager._accounts) == 2
+
+    @pytest.mark.asyncio
+    async def test_load_credentials_mixed_api_key_and_json(self, tmp_path, temp_creds_file):
+        """
+        What it does: api_key and json accounts coexist.
+        Purpose: Verify heterogeneous credential types are loaded together.
+        """
+        creds = [
+            {"type": "api_key", "api_key": "ksk_mixed_key_999"},
+            {"type": "json", "path": temp_creds_file},
+        ]
+        creds_file = tmp_path / "credentials.json"
+        creds_file.write_text(json.dumps(creds))
+        state_file = tmp_path / "state.json"
+
+        manager = AccountManager(str(creds_file), str(state_file))
+        await manager.load_credentials()
+
+        assert len(manager._accounts) == 2
+        assert any(aid.startswith("api_key_") for aid in manager._accounts)
+
+
+
+class TestShouldUseStaticModels:
+    """
+    Tests for _should_use_static_models(): API keys and runtime endpoints must
+    skip the /ListAvailableModels call (API keys return 403 on it).
+    """
+
+    def test_api_key_auth_uses_static_models(self):
+        """
+        What it does: API_KEY auth -> use static models (skip ListAvailableModels).
+        Purpose: Verified ksk_ keys 403 on ListAvailableModels; avoid wasted retries.
+        """
+        from kiro.account_manager import _should_use_static_models
+        from kiro.auth import KiroAuthManager
+
+        mgr = KiroAuthManager(api_key="ksk_static_models_test")
+        assert _should_use_static_models(mgr) is True
+
+    def test_runtime_endpoint_uses_static_models(self):
+        """
+        What it does: runtime.kiro.dev endpoint -> static models.
+        Purpose: Preserve existing runtime-endpoint behavior.
+        """
+        from kiro.account_manager import _should_use_static_models
+        from unittest.mock import MagicMock
+        from kiro.auth import AuthType
+
+        mgr = MagicMock()
+        mgr.auth_type = AuthType.KIRO_DESKTOP
+        mgr.api_host = "https://runtime.us-east-1.kiro.dev"
+        assert _should_use_static_models(mgr) is True
+
+    def test_q_endpoint_non_apikey_fetches_dynamically(self):
+        """
+        What it does: q.amazonaws.com + non-API-key -> dynamic fetch (not static).
+        Purpose: Ensure we don't over-broaden the static-model path.
+        """
+        from kiro.account_manager import _should_use_static_models
+        from unittest.mock import MagicMock
+        from kiro.auth import AuthType
+
+        mgr = MagicMock()
+        mgr.auth_type = AuthType.AWS_SSO_OIDC
+        mgr.api_host = "https://q.us-east-1.amazonaws.com"
+        assert _should_use_static_models(mgr) is False
+
+
+class TestAccountManagerApiKeyInitialization:
+    """
+    Tests for initializing a Kiro Session Key (API-key) account end-to-end:
+    it must validate authentication, skip ListAvailableModels, and use fallback models.
+    """
+
+    @pytest.mark.asyncio
+    async def test_api_key_account_init_validates_and_uses_static_models(self, tmp_path):
+        """
+        What it does: Initializes an api_key account; validate() succeeds (mocked 200).
+        Purpose: Verify the supported path - authenticate (validate) + static models,
+                 no ListAvailableModels call (which would 403).
+        """
+        creds = [{
+            "type": "api_key",
+            "api_key": "ksk_init_test_key",
+        }]
+        creds_file = tmp_path / "credentials.json"
+        creds_file.write_text(json.dumps(creds))
+        state_file = tmp_path / "state.json"
+
+        manager = AccountManager(str(creds_file), str(state_file))
+        await manager.load_credentials()
+
+        account_id = list(manager._accounts.keys())[0]
+
+        # validate() makes a network call (blocked in tests) -> mock it to succeed
+        with patch.object(KiroAuthManager, "validate", new=AsyncMock(return_value=True)):
+            ok = await manager._initialize_account(account_id)
+
+        assert ok is True
+        account = manager._accounts[account_id]
+        assert account.auth_manager.auth_type == AuthType.API_KEY
+        # Static (fallback) models loaded (ListAvailableModels skipped)
+        assert len(account.model_resolver.get_available_models()) > 0
+
+    @pytest.mark.asyncio
+    async def test_api_key_account_init_fails_when_validation_fails(self, tmp_path):
+        """
+        What it does: Init fails when the Session Key fails authentication (validate False).
+        Purpose: Invalid/unauthenticated keys must not initialize.
+        """
+        creds = [{"type": "api_key", "api_key": "ksk_bad_key"}]
+        creds_file = tmp_path / "credentials.json"
+        creds_file.write_text(json.dumps(creds))
+        state_file = tmp_path / "state.json"
+
+        manager = AccountManager(str(creds_file), str(state_file))
+        await manager.load_credentials()
+        account_id = list(manager._accounts.keys())[0]
+
+        with patch.object(KiroAuthManager, "validate", new=AsyncMock(return_value=False)):
+            ok = await manager._initialize_account(account_id)
+
+        assert ok is False

@@ -969,3 +969,60 @@ class TestAccountSystemConfig:
         
         print(f"Comparing STATE_SAVE_INTERVAL_SECONDS: Expected 10, Got {config_module.STATE_SAVE_INTERVAL_SECONDS}")
         assert config_module.STATE_SAVE_INTERVAL_SECONDS == 10
+
+
+
+class TestApiKeyConfig:
+    """Tests for API Key authentication configuration."""
+
+    def test_api_key_service_host_default_template_has_region_placeholder(self):
+        """
+        What it does: Verifies the default service host template contains {region}.
+        Purpose: Ensure region substitution works for the API-key service endpoint.
+        """
+        from kiro.config import KIRO_API_KEY_SERVICE_HOST_TEMPLATE
+        print(f"Template: {KIRO_API_KEY_SERVICE_HOST_TEMPLATE}")
+        assert "{region}" in KIRO_API_KEY_SERVICE_HOST_TEMPLATE
+
+    def test_api_key_service_host_default_is_q_amazonaws(self):
+        """
+        What it does: Verifies the default service host is q.{region}.amazonaws.com.
+        Purpose: API keys use the CodeWhisperer/Q service, not runtime.kiro.dev.
+        """
+        from kiro.config import get_kiro_api_key_service_host
+        url = get_kiro_api_key_service_host("us-east-1")
+        print(f"Service host: {url}")
+        assert url == "https://q.us-east-1.amazonaws.com"
+
+    def test_get_kiro_api_key_service_host_substitutes_region(self):
+        """
+        What it does: Verifies the helper substitutes the region.
+        Purpose: Ensure the helper builds a region-specific host.
+        """
+        from kiro.config import get_kiro_api_key_service_host
+        url = get_kiro_api_key_service_host("eu-central-1")
+        assert "eu-central-1" in url
+        assert url.startswith("https://")
+
+    def test_api_key_service_configured_flag_is_bool(self):
+        """
+        What it does: Verifies KIRO_API_KEY_SERVICE_CONFIGURED is a boolean.
+        Purpose: Ensure the flag has the expected type.
+        """
+        from kiro.config import KIRO_API_KEY_SERVICE_CONFIGURED
+        assert isinstance(KIRO_API_KEY_SERVICE_CONFIGURED, bool)
+
+    def test_api_key_service_url_respects_env_override(self):
+        """
+        What it does: Verifies KIRO_API_KEY_SERVICE_URL env var overrides default.
+        Purpose: Ensure operators can point at a custom service host without code changes.
+        """
+        import importlib
+        with patch.dict(os.environ, {"KIRO_API_KEY_SERVICE_URL": "https://custom.test/{region}"}):
+            import kiro.config as cfg
+            importlib.reload(cfg)
+            try:
+                assert cfg.KIRO_API_KEY_SERVICE_CONFIGURED is True
+                assert cfg.get_kiro_api_key_service_host("us-east-1") == "https://custom.test/us-east-1"
+            finally:
+                importlib.reload(cfg)

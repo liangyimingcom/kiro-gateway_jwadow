@@ -93,6 +93,28 @@ def _is_runtime_endpoint(auth_manager: KiroAuthManager) -> bool:
     return "://runtime." in auth_manager.api_host
 
 
+def _should_use_static_models(auth_manager: KiroAuthManager) -> bool:
+    """
+    Decide whether to skip the /ListAvailableModels call and use static models.
+
+    Returns True when:
+    - The runtime endpoint is used (does not provide /ListAvailableModels), OR
+    - Authentication is via an API key. Verified behavior: API keys (ksk_) return
+      403 on /ListAvailableModels (they are identity/session credentials whose
+      model access is gated by the assigned profile), so calling it just wastes
+      retries. Static fallback models are used instead.
+
+    Args:
+        auth_manager: KiroAuthManager instance
+
+    Returns:
+        True if static fallback models should be used, False to fetch dynamically.
+    """
+    if auth_manager.auth_type == AuthType.API_KEY:
+        return True
+    return _is_runtime_endpoint(auth_manager)
+
+
 def _format_duration(seconds: float) -> str:
     """
     Format duration in human-readable format.
@@ -256,7 +278,23 @@ class AccountManager:
             if cred_type == "refresh_token" and not entry.get("refresh_token"):
                 logger.warning(f"Invalid credential entry (type=refresh_token requires refresh_token field): {entry}")
                 continue
-            
+
+            # For api_key type, api_key field is required
+            if cred_type == "api_key" and not entry.get("api_key"):
+                logger.warning(f"Invalid credential entry (type=api_key requires api_key field): {entry}")
+                continue
+
+            # Handle api_key type (no path processing needed)
+            if cred_type == "api_key":
+                # Use deterministic hash so account_id is stable across restarts
+                # and the raw key is never stored as an identifier.
+                key = entry.get("api_key", "")
+                key_hash = hashlib.sha256(key.encode()).hexdigest()[:16]
+                account_id = f"api_key_{key_hash}"
+                self._accounts[account_id] = Account(id=account_id)
+                logger.debug(f"Added account: {account_id}")
+                continue  # Skip path processing for api_key
+
             # Handle refresh_token type (no path processing needed)
             if cred_type == "refresh_token":
                 # Use deterministic hash for refresh_token (hash() is not deterministic between process restarts)
@@ -459,6 +497,13 @@ class AccountManager:
                     if account_id == f"refresh_token_{token_hash}":
                         creds_config = entry
                         break
+                elif entry.get("type") == "api_key":
+                    # Match by deterministic hash for api_key type
+                    key = entry.get('api_key', '')
+                    key_hash = hashlib.sha256(key.encode()).hexdigest()[:16]
+                    if account_id == f"api_key_{key_hash}":
+                        creds_config = entry
+                        break
                 elif str(expanded_path.resolve()) == account_id or (expanded_path.is_dir() and account_id.startswith(str(expanded_path.resolve()) + os.sep)):
                     creds_config = entry
                     break
@@ -490,18 +535,36 @@ class AccountManager:
                     region=creds_config.get("region", "us-east-1"),
                     api_region=creds_config.get("api_region")
                 )
+            elif cred_type == "api_key":
+                auth_manager = KiroAuthManager(
+                    api_key=creds_config.get("api_key"),
+                    profile_arn=creds_config.get("profile_arn"),
+                    region=creds_config.get("region", "us-east-1"),
+                    api_region=creds_config.get("api_region")
+                )
             else:
                 logger.error(f"Unknown credential type: {cred_type}")
                 return False
             
             # Get token to verify credentials
             token = await auth_manager.get_access_token()
+
+            # Kiro Session Key (API key) is an authentication-only credential.
+            # Verify it actually authenticates against Kiro's identity endpoint.
+            if auth_manager.auth_type == AuthType.API_KEY:
+                if not await auth_manager.validate():
+                    logger.error(
+                        f"API-key account {account_id}: Kiro Session Key failed "
+                        f"authentication validation (invalid or unauthenticated key)"
+                    )
+                    return False
+                logger.info(f"API-key account {account_id}: Session Key authenticated")
             
             # Determine if we should fetch models or use static list
-            if _is_runtime_endpoint(auth_manager):
-                # New runtime endpoint does not provide /ListAvailableModels (AWS limitation)
-                # Use static list without attempting request
-                logger.debug(f"Account {account_id}: Using static model list for runtime.kiro.dev endpoint")
+            if _should_use_static_models(auth_manager):
+                # Runtime endpoint (no /ListAvailableModels) or API-key auth
+                # (returns 403 on /ListAvailableModels). Use static list.
+                logger.debug(f"Account {account_id}: Using static model list (endpoint/auth does not support ListAvailableModels)")
                 models_list = FALLBACK_MODELS
             else:
                 # Old endpoint - attempt to fetch dynamic model list
@@ -589,11 +652,11 @@ class AccountManager:
         if not account or not account.auth_manager:
             return
         
-        # Check if using runtime endpoint (no dynamic model list available)
-        if _is_runtime_endpoint(account.auth_manager):
-            # Runtime endpoint does not provide /ListAvailableModels
+        # Check if using runtime endpoint or API-key auth (no dynamic model list)
+        if _should_use_static_models(account.auth_manager):
+            # Runtime endpoint or API-key auth does not provide /ListAvailableModels
             # Use static list and update cache timestamp
-            logger.debug(f"Account {account_id}: Skipping model refresh for runtime.kiro.dev endpoint (using static list)")
+            logger.debug(f"Account {account_id}: Skipping model refresh (using static list)")
             await account.model_cache.update(FALLBACK_MODELS)
             account.models_cached_at = time.time()
             self._dirty = True

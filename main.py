@@ -59,6 +59,7 @@ from kiro.config import (
     APP_DESCRIPTION,
     APP_VERSION,
     REFRESH_TOKEN,
+    KIRO_API_KEY,
     PROFILE_ARN,
     REGION,
     KIRO_CREDS_FILE,
@@ -240,6 +241,7 @@ def validate_configuration() -> None:
     has_refresh_token = bool(REFRESH_TOKEN)
     has_creds_file = bool(KIRO_CREDS_FILE)
     has_cli_db = bool(KIRO_CLI_DB_FILE)
+    has_api_key = bool(KIRO_API_KEY)
     
     # Check if creds file actually exists
     if KIRO_CREDS_FILE:
@@ -256,7 +258,7 @@ def validate_configuration() -> None:
             logger.warning(f"KIRO_CLI_DB_FILE not found: {KIRO_CLI_DB_FILE}")
     
     # If no credentials found, show helpful error
-    if not has_refresh_token and not has_creds_file and not has_cli_db:
+    if not has_refresh_token and not has_creds_file and not has_cli_db and not has_api_key:
         if not env_file.exists():
             # No .env file and no environment variables
             errors.append(
@@ -364,6 +366,7 @@ async def lifespan(app: FastAPI):
     has_refresh_token = bool(REFRESH_TOKEN)
     has_creds_file = bool(KIRO_CREDS_FILE) and Path(KIRO_CREDS_FILE).expanduser().exists()
     has_cli_db = bool(KIRO_CLI_DB_FILE) and Path(KIRO_CLI_DB_FILE).expanduser().exists()
+    has_api_key = bool(KIRO_API_KEY)
     
     # Helper function to add optional per-account overrides from .env
     def _add_env_overrides(entry: dict) -> None:
@@ -383,12 +386,19 @@ async def lifespan(app: FastAPI):
     if ACCOUNT_SYSTEM:
         # Account system enabled: create credentials.json ONCE (migration)
         if not creds_path.exists():
-            if has_refresh_token or has_creds_file or has_cli_db:
+            if has_refresh_token or has_creds_file or has_cli_db or has_api_key:
                 logger.info("credentials.json not found, creating from .env (one-time migration)")
                 credentials = []
                 
-                # Priority: SQLite DB > JSON file > environment variables (same as KiroAuthManager)
-                if has_cli_db:
+                # Priority: API key > SQLite DB > JSON file > environment variables
+                if has_api_key:
+                    entry = {
+                        "type": "api_key",
+                        "api_key": KIRO_API_KEY
+                    }
+                    _add_env_overrides(entry)
+                    credentials.append(entry)
+                elif has_cli_db:
                     entry = {
                         "type": "sqlite",
                         "path": KIRO_CLI_DB_FILE
@@ -417,12 +427,19 @@ async def lifespan(app: FastAPI):
                 logger.info("Created credentials.json from .env (one-time migration)")
     else:
         # Legacy mode: ALWAYS recreate credentials.json from .env
-        if has_refresh_token or has_creds_file or has_cli_db:
+        if has_refresh_token or has_creds_file or has_cli_db or has_api_key:
             logger.debug("Legacy mode: recreating credentials.json from .env")
             credentials = []
             
-            # Priority: SQLite DB > JSON file > environment variables (same as KiroAuthManager)
-            if has_cli_db:
+            # Priority: API key > SQLite DB > JSON file > environment variables
+            if has_api_key:
+                entry = {
+                    "type": "api_key",
+                    "api_key": KIRO_API_KEY
+                }
+                _add_env_overrides(entry)
+                credentials.append(entry)
+            elif has_cli_db:
                 entry = {
                     "type": "sqlite",
                     "path": KIRO_CLI_DB_FILE

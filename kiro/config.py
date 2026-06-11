@@ -127,6 +127,18 @@ VPN_PROXY_URL: str = os.getenv("VPN_PROXY_URL", "")
 # Refresh token for updating access token
 REFRESH_TOKEN: str = os.getenv("REFRESH_TOKEN", "")
 
+# Kiro Session Key for API-key authentication (created on the Kiro website).
+# When set, this is treated as a credential source equivalent to a single account.
+#
+# Protocol (verified via official CLI binary analysis + live probing, see
+# docs/zh/API_KEY_AUTH_POC_RESULT.md):
+# A Kiro Session Key (prefix "ksk_") is an AUTHENTICATION-ONLY credential. It is
+# used directly as an HTTP Bearer token against the AWS CodeWhisperer / Q Developer
+# identity endpoint (q.{region}.amazonaws.com). It confirms identity (validated via
+# ListAvailableProfiles -> HTTP 200) but does NOT, by itself, grant model-serving
+# access. No token exchange is required.
+KIRO_API_KEY: str = os.getenv("KIRO_API_KEY", "")
+
 # Profile ARN for AWS CodeWhisperer
 PROFILE_ARN: str = os.getenv("PROFILE_ARN", "")
 
@@ -174,6 +186,18 @@ KIRO_REFRESH_URL_TEMPLATE: str = "https://prod.{region}.auth.desktop.kiro.dev/re
 
 # URL for token refresh (AWS SSO OIDC - used by kiro-cli)
 AWS_SSO_OIDC_URL_TEMPLATE: str = "https://oidc.{region}.amazonaws.com/token"
+
+# Service host for Kiro Session Key (API-key) authentication.
+#
+# Verified protocol: a Kiro Session Key is a direct Bearer token for the AWS
+# CodeWhisperer / Q Developer identity endpoint at q.{region}.amazonaws.com.
+# This host is used to validate the key (ListAvailableProfiles -> HTTP 200).
+#
+# Overridable via KIRO_API_KEY_SERVICE_URL (may contain '{region}').
+KIRO_API_KEY_SERVICE_HOST_TEMPLATE: str = os.getenv(
+    "KIRO_API_KEY_SERVICE_URL",
+    "https://q.{region}.amazonaws.com",
+)
 
 # Host for main API (generateAssistantResponse)
 # Universal endpoint for all regions (us-east-1, eu-central-1, etc.)
@@ -568,6 +592,16 @@ def get_kiro_refresh_url(region: str) -> str:
 def get_aws_sso_oidc_url(region: str) -> str:
     """Return AWS SSO OIDC token URL for the specified region."""
     return AWS_SSO_OIDC_URL_TEMPLATE.format(region=region)
+
+
+# Whether a custom API-key service host has been explicitly configured.
+# (Informational; the default q.{region}.amazonaws.com works out of the box.)
+KIRO_API_KEY_SERVICE_CONFIGURED: bool = bool(os.getenv("KIRO_API_KEY_SERVICE_URL"))
+
+
+def get_kiro_api_key_service_host(region: str) -> str:
+    """Return the CodeWhisperer/Q service host used for API-key authentication."""
+    return KIRO_API_KEY_SERVICE_HOST_TEMPLATE.format(region=region)
 
 
 def get_kiro_api_host(region: str) -> str:
