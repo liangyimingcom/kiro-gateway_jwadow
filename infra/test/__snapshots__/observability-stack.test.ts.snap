@@ -1,0 +1,632 @@
+// Jest Snapshot v1, https://goo.gl/fbAQLP
+
+exports[`ObservabilityStack 合规测试 合成模板快照（toMatchSnapshot） 1`] = `
+{
+  "Parameters": {
+    "BootstrapVersion": {
+      "Default": "/cdk-bootstrap/hnb659fds/version",
+      "Description": "Version of the CDK Bootstrap resources in this environment, automatically retrieved from SSM Parameter Store. [cdk:skip]",
+      "Type": "AWS::SSM::Parameter::Value<String>",
+    },
+  },
+  "Resources": {
+    "AlarmTopicD01E77F9": {
+      "Properties": {
+        "DisplayName": "kiro-gateway Gateway 告警通知",
+        "TopicName": "kiro-gateway-gateway-alarms",
+      },
+      "Type": "AWS::SNS::Topic",
+    },
+    "Dashboard9E4231ED": {
+      "Properties": {
+        "DashboardBody": {
+          "Fn::Join": [
+            "",
+            [
+              "{"widgets":[{"type":"metric","width":12,"height":6,"x":0,"y":0,"properties":{"view":"timeSeries","title":"请求量","region":"",
+              {
+                "Ref": "AWS::Region",
+              },
+              "","metrics":[["AWS/ApplicationELB","RequestCount","LoadBalancer","",
+              {
+                "Fn::Select": [
+                  1,
+                  {
+                    "Fn::Split": [
+                      "/",
+                      {
+                        "Fn::ImportValue": "kiro-gateway-compute:ExportsOutputRefAlbHttpListener00C8B33EB501C1D0",
+                      },
+                    ],
+                  },
+                ],
+              },
+              "/",
+              {
+                "Fn::Select": [
+                  2,
+                  {
+                    "Fn::Split": [
+                      "/",
+                      {
+                        "Fn::ImportValue": "kiro-gateway-compute:ExportsOutputRefAlbHttpListener00C8B33EB501C1D0",
+                      },
+                    ],
+                  },
+                ],
+              },
+              "/",
+              {
+                "Fn::Select": [
+                  3,
+                  {
+                    "Fn::Split": [
+                      "/",
+                      {
+                        "Fn::ImportValue": "kiro-gateway-compute:ExportsOutputRefAlbHttpListener00C8B33EB501C1D0",
+                      },
+                    ],
+                  },
+                ],
+              },
+              "","TargetGroup","",
+              {
+                "Fn::ImportValue": "kiro-gateway-compute:ExportsOutputFnGetAttAlbHttpListenerGatewayTargetsGroup9359DA62TargetGroupFullName4E530005",
+              },
+              "",{"label":"请求量","stat":"Sum"}]],"yAxis":{}}},{"type":"metric","width":12,"height":6,"x":12,"y":0,"properties":{"view":"timeSeries","title":"错误率与 5xx","region":"",
+              {
+                "Ref": "AWS::Region",
+              },
+              "","metrics":[[{"label":"5xx 错误率(%)","expression":"100 * (m5xxTarget + m5xxElb) / FILL(mRequests, 0)"}],["AWS/ApplicationELB","HTTPCode_Target_5XX_Count","LoadBalancer","",
+              {
+                "Fn::Select": [
+                  1,
+                  {
+                    "Fn::Split": [
+                      "/",
+                      {
+                        "Fn::ImportValue": "kiro-gateway-compute:ExportsOutputRefAlbHttpListener00C8B33EB501C1D0",
+                      },
+                    ],
+                  },
+                ],
+              },
+              "/",
+              {
+                "Fn::Select": [
+                  2,
+                  {
+                    "Fn::Split": [
+                      "/",
+                      {
+                        "Fn::ImportValue": "kiro-gateway-compute:ExportsOutputRefAlbHttpListener00C8B33EB501C1D0",
+                      },
+                    ],
+                  },
+                ],
+              },
+              "/",
+              {
+                "Fn::Select": [
+                  3,
+                  {
+                    "Fn::Split": [
+                      "/",
+                      {
+                        "Fn::ImportValue": "kiro-gateway-compute:ExportsOutputRefAlbHttpListener00C8B33EB501C1D0",
+                      },
+                    ],
+                  },
+                ],
+              },
+              "","TargetGroup","",
+              {
+                "Fn::ImportValue": "kiro-gateway-compute:ExportsOutputFnGetAttAlbHttpListenerGatewayTargetsGroup9359DA62TargetGroupFullName4E530005",
+              },
+              "",{"label":"目标 5xx","id":"m5xxTarget","stat":"Sum","yAxis":"right"}],["AWS/ApplicationELB","HTTPCode_ELB_5XX_Count","LoadBalancer","",
+              {
+                "Fn::ImportValue": "kiro-gateway-compute:ExportsOutputFnGetAttAlb16C2F182LoadBalancerFullName73BA17C5",
+              },
+              "",{"label":"ALB 5xx","id":"m5xxElb","stat":"Sum","yAxis":"right"}],["AWS/ApplicationELB","RequestCount","LoadBalancer","",
+              {
+                "Fn::Select": [
+                  1,
+                  {
+                    "Fn::Split": [
+                      "/",
+                      {
+                        "Fn::ImportValue": "kiro-gateway-compute:ExportsOutputRefAlbHttpListener00C8B33EB501C1D0",
+                      },
+                    ],
+                  },
+                ],
+              },
+              "/",
+              {
+                "Fn::Select": [
+                  2,
+                  {
+                    "Fn::Split": [
+                      "/",
+                      {
+                        "Fn::ImportValue": "kiro-gateway-compute:ExportsOutputRefAlbHttpListener00C8B33EB501C1D0",
+                      },
+                    ],
+                  },
+                ],
+              },
+              "/",
+              {
+                "Fn::Select": [
+                  3,
+                  {
+                    "Fn::Split": [
+                      "/",
+                      {
+                        "Fn::ImportValue": "kiro-gateway-compute:ExportsOutputRefAlbHttpListener00C8B33EB501C1D0",
+                      },
+                    ],
+                  },
+                ],
+              },
+              "","TargetGroup","",
+              {
+                "Fn::ImportValue": "kiro-gateway-compute:ExportsOutputFnGetAttAlbHttpListenerGatewayTargetsGroup9359DA62TargetGroupFullName4E530005",
+              },
+              "",{"label":"请求量","id":"mRequests","visible":false,"stat":"Sum"}]],"yAxis":{}}},{"type":"metric","width":12,"height":6,"x":0,"y":6,"properties":{"view":"timeSeries","title":"延迟 (P95)","region":"",
+              {
+                "Ref": "AWS::Region",
+              },
+              "","metrics":[["AWS/ApplicationELB","TargetResponseTime","LoadBalancer","",
+              {
+                "Fn::Select": [
+                  1,
+                  {
+                    "Fn::Split": [
+                      "/",
+                      {
+                        "Fn::ImportValue": "kiro-gateway-compute:ExportsOutputRefAlbHttpListener00C8B33EB501C1D0",
+                      },
+                    ],
+                  },
+                ],
+              },
+              "/",
+              {
+                "Fn::Select": [
+                  2,
+                  {
+                    "Fn::Split": [
+                      "/",
+                      {
+                        "Fn::ImportValue": "kiro-gateway-compute:ExportsOutputRefAlbHttpListener00C8B33EB501C1D0",
+                      },
+                    ],
+                  },
+                ],
+              },
+              "/",
+              {
+                "Fn::Select": [
+                  3,
+                  {
+                    "Fn::Split": [
+                      "/",
+                      {
+                        "Fn::ImportValue": "kiro-gateway-compute:ExportsOutputRefAlbHttpListener00C8B33EB501C1D0",
+                      },
+                    ],
+                  },
+                ],
+              },
+              "","TargetGroup","",
+              {
+                "Fn::ImportValue": "kiro-gateway-compute:ExportsOutputFnGetAttAlbHttpListenerGatewayTargetsGroup9359DA62TargetGroupFullName4E530005",
+              },
+              "",{"label":"延迟 P95","stat":"p95"}]],"yAxis":{}}},{"type":"metric","width":12,"height":6,"x":12,"y":6,"properties":{"view":"timeSeries","title":"运行实例数与健康目标","region":"",
+              {
+                "Ref": "AWS::Region",
+              },
+              "","metrics":[["ECS/ContainerInsights","RunningTaskCount","ClusterName","",
+              {
+                "Fn::ImportValue": "kiro-gateway-compute:ExportsOutputRefClusterEB0386A796A0E3FE",
+              },
+              "","ServiceName","",
+              {
+                "Fn::ImportValue": "kiro-gateway-compute:ExportsOutputFnGetAttServiceD69D759BName51127533",
+              },
+              "",{"label":"运行实例数"}],["AWS/ApplicationELB","HealthyHostCount","LoadBalancer","",
+              {
+                "Fn::Select": [
+                  1,
+                  {
+                    "Fn::Split": [
+                      "/",
+                      {
+                        "Fn::ImportValue": "kiro-gateway-compute:ExportsOutputRefAlbHttpListener00C8B33EB501C1D0",
+                      },
+                    ],
+                  },
+                ],
+              },
+              "/",
+              {
+                "Fn::Select": [
+                  2,
+                  {
+                    "Fn::Split": [
+                      "/",
+                      {
+                        "Fn::ImportValue": "kiro-gateway-compute:ExportsOutputRefAlbHttpListener00C8B33EB501C1D0",
+                      },
+                    ],
+                  },
+                ],
+              },
+              "/",
+              {
+                "Fn::Select": [
+                  3,
+                  {
+                    "Fn::Split": [
+                      "/",
+                      {
+                        "Fn::ImportValue": "kiro-gateway-compute:ExportsOutputRefAlbHttpListener00C8B33EB501C1D0",
+                      },
+                    ],
+                  },
+                ],
+              },
+              "","TargetGroup","",
+              {
+                "Fn::ImportValue": "kiro-gateway-compute:ExportsOutputFnGetAttAlbHttpListenerGatewayTargetsGroup9359DA62TargetGroupFullName4E530005",
+              },
+              "",{"label":"健康目标数","stat":"Minimum","yAxis":"right"}]],"yAxis":{}}},{"type":"metric","width":12,"height":6,"x":0,"y":12,"properties":{"view":"timeSeries","title":"5xx 错误率告警","region":"",
+              {
+                "Ref": "AWS::Region",
+              },
+              "","annotations":{"alarms":["",
+              {
+                "Fn::GetAtt": [
+                  "Error5xxRateAlarmCA38A242",
+                  "Arn",
+                ],
+              },
+              ""]},"yAxis":{}}},{"type":"metric","width":12,"height":6,"x":12,"y":12,"properties":{"view":"timeSeries","title":"无健康目标告警","region":"",
+              {
+                "Ref": "AWS::Region",
+              },
+              "","annotations":{"alarms":["",
+              {
+                "Fn::GetAtt": [
+                  "NoHealthyHostsAlarm3D7691D7",
+                  "Arn",
+                ],
+              },
+              ""]},"yAxis":{}}}]}",
+            ],
+          ],
+        },
+        "DashboardName": "kiro-gateway-gateway",
+      },
+      "Type": "AWS::CloudWatch::Dashboard",
+    },
+    "Error5xxRateAlarmCA38A242": {
+      "Properties": {
+        "AlarmActions": [
+          {
+            "Ref": "AlarmTopicD01E77F9",
+          },
+        ],
+        "AlarmDescription": "5xx 错误率在持续 5 分钟内超过阈值。",
+        "AlarmName": "kiro-gateway-gateway-5xx-error-rate",
+        "ComparisonOperator": "GreaterThanThreshold",
+        "EvaluationPeriods": 1,
+        "Metrics": [
+          {
+            "Expression": "100 * (m5xxTarget + m5xxElb) / FILL(mRequests, 0)",
+            "Id": "expr_1",
+            "Label": "5xx 错误率(%)",
+            "ReturnData": true,
+          },
+          {
+            "Id": "m5xxTarget",
+            "Label": "目标 5xx",
+            "MetricStat": {
+              "Metric": {
+                "Dimensions": [
+                  {
+                    "Name": "LoadBalancer",
+                    "Value": {
+                      "Fn::Join": [
+                        "",
+                        [
+                          {
+                            "Fn::Select": [
+                              1,
+                              {
+                                "Fn::Split": [
+                                  "/",
+                                  {
+                                    "Fn::ImportValue": "kiro-gateway-compute:ExportsOutputRefAlbHttpListener00C8B33EB501C1D0",
+                                  },
+                                ],
+                              },
+                            ],
+                          },
+                          "/",
+                          {
+                            "Fn::Select": [
+                              2,
+                              {
+                                "Fn::Split": [
+                                  "/",
+                                  {
+                                    "Fn::ImportValue": "kiro-gateway-compute:ExportsOutputRefAlbHttpListener00C8B33EB501C1D0",
+                                  },
+                                ],
+                              },
+                            ],
+                          },
+                          "/",
+                          {
+                            "Fn::Select": [
+                              3,
+                              {
+                                "Fn::Split": [
+                                  "/",
+                                  {
+                                    "Fn::ImportValue": "kiro-gateway-compute:ExportsOutputRefAlbHttpListener00C8B33EB501C1D0",
+                                  },
+                                ],
+                              },
+                            ],
+                          },
+                        ],
+                      ],
+                    },
+                  },
+                  {
+                    "Name": "TargetGroup",
+                    "Value": {
+                      "Fn::ImportValue": "kiro-gateway-compute:ExportsOutputFnGetAttAlbHttpListenerGatewayTargetsGroup9359DA62TargetGroupFullName4E530005",
+                    },
+                  },
+                ],
+                "MetricName": "HTTPCode_Target_5XX_Count",
+                "Namespace": "AWS/ApplicationELB",
+              },
+              "Period": 300,
+              "Stat": "Sum",
+            },
+            "ReturnData": false,
+          },
+          {
+            "Id": "m5xxElb",
+            "Label": "ALB 5xx",
+            "MetricStat": {
+              "Metric": {
+                "Dimensions": [
+                  {
+                    "Name": "LoadBalancer",
+                    "Value": {
+                      "Fn::ImportValue": "kiro-gateway-compute:ExportsOutputFnGetAttAlb16C2F182LoadBalancerFullName73BA17C5",
+                    },
+                  },
+                ],
+                "MetricName": "HTTPCode_ELB_5XX_Count",
+                "Namespace": "AWS/ApplicationELB",
+              },
+              "Period": 300,
+              "Stat": "Sum",
+            },
+            "ReturnData": false,
+          },
+          {
+            "Id": "mRequests",
+            "Label": "请求量",
+            "MetricStat": {
+              "Metric": {
+                "Dimensions": [
+                  {
+                    "Name": "LoadBalancer",
+                    "Value": {
+                      "Fn::Join": [
+                        "",
+                        [
+                          {
+                            "Fn::Select": [
+                              1,
+                              {
+                                "Fn::Split": [
+                                  "/",
+                                  {
+                                    "Fn::ImportValue": "kiro-gateway-compute:ExportsOutputRefAlbHttpListener00C8B33EB501C1D0",
+                                  },
+                                ],
+                              },
+                            ],
+                          },
+                          "/",
+                          {
+                            "Fn::Select": [
+                              2,
+                              {
+                                "Fn::Split": [
+                                  "/",
+                                  {
+                                    "Fn::ImportValue": "kiro-gateway-compute:ExportsOutputRefAlbHttpListener00C8B33EB501C1D0",
+                                  },
+                                ],
+                              },
+                            ],
+                          },
+                          "/",
+                          {
+                            "Fn::Select": [
+                              3,
+                              {
+                                "Fn::Split": [
+                                  "/",
+                                  {
+                                    "Fn::ImportValue": "kiro-gateway-compute:ExportsOutputRefAlbHttpListener00C8B33EB501C1D0",
+                                  },
+                                ],
+                              },
+                            ],
+                          },
+                        ],
+                      ],
+                    },
+                  },
+                  {
+                    "Name": "TargetGroup",
+                    "Value": {
+                      "Fn::ImportValue": "kiro-gateway-compute:ExportsOutputFnGetAttAlbHttpListenerGatewayTargetsGroup9359DA62TargetGroupFullName4E530005",
+                    },
+                  },
+                ],
+                "MetricName": "RequestCount",
+                "Namespace": "AWS/ApplicationELB",
+              },
+              "Period": 300,
+              "Stat": "Sum",
+            },
+            "ReturnData": false,
+          },
+        ],
+        "OKActions": [
+          {
+            "Ref": "AlarmTopicD01E77F9",
+          },
+        ],
+        "Threshold": 5,
+        "TreatMissingData": "notBreaching",
+      },
+      "Type": "AWS::CloudWatch::Alarm",
+    },
+    "NoHealthyHostsAlarm3D7691D7": {
+      "Properties": {
+        "AlarmActions": [
+          {
+            "Ref": "AlarmTopicD01E77F9",
+          },
+        ],
+        "AlarmDescription": "没有任何 Gateway 实例通过健康检查。",
+        "AlarmName": "kiro-gateway-gateway-no-healthy-hosts",
+        "ComparisonOperator": "LessThanThreshold",
+        "EvaluationPeriods": 1,
+        "Metrics": [
+          {
+            "Id": "m1",
+            "Label": "健康目标数",
+            "MetricStat": {
+              "Metric": {
+                "Dimensions": [
+                  {
+                    "Name": "LoadBalancer",
+                    "Value": {
+                      "Fn::Join": [
+                        "",
+                        [
+                          {
+                            "Fn::Select": [
+                              1,
+                              {
+                                "Fn::Split": [
+                                  "/",
+                                  {
+                                    "Fn::ImportValue": "kiro-gateway-compute:ExportsOutputRefAlbHttpListener00C8B33EB501C1D0",
+                                  },
+                                ],
+                              },
+                            ],
+                          },
+                          "/",
+                          {
+                            "Fn::Select": [
+                              2,
+                              {
+                                "Fn::Split": [
+                                  "/",
+                                  {
+                                    "Fn::ImportValue": "kiro-gateway-compute:ExportsOutputRefAlbHttpListener00C8B33EB501C1D0",
+                                  },
+                                ],
+                              },
+                            ],
+                          },
+                          "/",
+                          {
+                            "Fn::Select": [
+                              3,
+                              {
+                                "Fn::Split": [
+                                  "/",
+                                  {
+                                    "Fn::ImportValue": "kiro-gateway-compute:ExportsOutputRefAlbHttpListener00C8B33EB501C1D0",
+                                  },
+                                ],
+                              },
+                            ],
+                          },
+                        ],
+                      ],
+                    },
+                  },
+                  {
+                    "Name": "TargetGroup",
+                    "Value": {
+                      "Fn::ImportValue": "kiro-gateway-compute:ExportsOutputFnGetAttAlbHttpListenerGatewayTargetsGroup9359DA62TargetGroupFullName4E530005",
+                    },
+                  },
+                ],
+                "MetricName": "HealthyHostCount",
+                "Namespace": "AWS/ApplicationELB",
+              },
+              "Period": 300,
+              "Stat": "Minimum",
+            },
+            "ReturnData": true,
+          },
+        ],
+        "OKActions": [
+          {
+            "Ref": "AlarmTopicD01E77F9",
+          },
+        ],
+        "Threshold": 1,
+        "TreatMissingData": "breaching",
+      },
+      "Type": "AWS::CloudWatch::Alarm",
+    },
+  },
+  "Rules": {
+    "CheckBootstrapVersion": {
+      "Assertions": [
+        {
+          "Assert": {
+            "Fn::Not": [
+              {
+                "Fn::Contains": [
+                  [
+                    "1",
+                    "2",
+                    "3",
+                    "4",
+                    "5",
+                  ],
+                  {
+                    "Ref": "BootstrapVersion",
+                  },
+                ],
+              },
+            ],
+          },
+          "AssertDescription": "CDK bootstrap stack version 6 required. Please run 'cdk bootstrap' with a recent version of the CDK CLI.",
+        },
+      ],
+    },
+  },
+}
+`;

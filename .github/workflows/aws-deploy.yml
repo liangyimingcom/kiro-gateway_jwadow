@@ -1,0 +1,186 @@
+# =============================================================================
+# AWS 云原生部署工作流（AWS Cloud-Native Deploy）
+# -----------------------------------------------------------------------------
+# 目标（Task 17 / Requirements 9.1, 9.2）：
+#   以基础设施即代码（AWS CDK, TypeScript）一键部署 kiro-gateway 的全部 AWS 资源
+#   （Gateway_Service / Load_Balancer / Auto_Scaler / State_Store / Secret_Store /
+#    Object_Store / Observability_Service）。
+#
+# 镜像构建与推送说明（重要）：
+#   CDK 计算层使用 `ecs.ContainerImage.fromAsset(...)` 引用本仓库的 `Dockerfile`。
+#   因此 **镜像的构建与推送由 `cdk deploy` 自身完成**：CDK 会在部署过程中本地构建
+#   镜像并推送到由 CDK Bootstrap 创建的 ECR 资产仓库（`cdk-hnb659fds-container-assets-*`）。
+#   => 本工作流 **无需** 单独的 `ECR login / docker build / docker push` 步骤。
+#      （现有 `.github/workflows/docker.yml` 仍负责构建并推送到 ghcr.io，二者互不影响。）
+#
+# 安全设计：
+#   - 主触发方式为手动 `workflow_dispatch`，避免每次提交自动部署到 AWS。
+#   - 同时支持 push 到 `release/**` 分支或 `v*` 标签时部署（可按需删除该触发器）。
+#   - 通过 GitHub OIDC + `aws-actions/configure-aws-credentials` 进行短期凭证假设，
+#     **不在仓库中存放长期 AWS 访问密钥**。
+#
+# -----------------------------------------------------------------------------
+# 前置条件（Prerequisites）
+# -----------------------------------------------------------------------------
+#   1. 在目标 AWS 账号/区域中已执行 CDK Bootstrap（每个账号+区域仅需一次）：
+#          npx cdk bootstrap aws://<ACCOUNT_ID>/<REGION>
+#      Bootstrap 会创建 CDK 资产所需的 S3 桶与 ECR 仓库；缺少它 `fromAsset` 推送会失败。
+#   2. 已创建一个可被 GitHub Actions 通过 OIDC 假设的 IAM 角色，信任策略示例：
+#          Principal: token.actions.githubusercontent.com
+#          sub 限定: repo:<owner>/<repo>:ref:refs/heads/release/*  等
+#      该角色需具备部署 CDK 所需权限（建议 CloudFormation + 资产桶/ECR + 目标服务，
+#      或在受控环境中使用较宽的部署权限）。
+#
+# -----------------------------------------------------------------------------
+# 必需的仓库 Secrets / Variables（Settings → Secrets and variables → Actions）
+# -----------------------------------------------------------------------------
+#   Secret  AWS_DEPLOY_ROLE_ARN   必需。供 OIDC 假设的 IAM 角色 ARN，
+#                                 形如 arn:aws:iam::<ACCOUNT_ID>:role/<role-name>。
+#   Var     AWS_DEPLOY_REGION     可选。当手动输入 region 留空时的默认区域回退值。
+#
+# -----------------------------------------------------------------------------
+# 参数透传：下方 `-c key=value` 的键与 infra/bin/app.ts 读取的 CDK context 键一致：
+#   region / stackName / minInstances / maxInstances / certificateArn / enableWaf
+# =============================================================================
+
+name: AWS CDK Deploy
+
+on:
+  # 主触发方式：手动触发，安全可控（不会在每次提交时自动部署）。
+  workflow_dispatch:
+    inputs:
+      region:
+        description: "AWS 部署区域（留空则回退到 vars.AWS_DEPLOY_REGION 或 us-east-1）"
+        required: false
+        default: "us-east-1"
+        type: string
+      stackName:
+        description: "Stack 名称前缀（CDK context: stackName）"
+        required: false
+        default: "kiro-gateway"
+        type: string
+      minInstances:
+        description: "最小实例数（CDK context: minInstances）"
+        required: false
+        default: "2"
+        type: string
+      maxInstances:
+        description: "最大实例数（CDK context: maxInstances）"
+        required: false
+        default: "6"
+        type: string
+      certificateArn:
+        description: "可选：ACM 证书 ARN，提供时启用 HTTPS:443（CDK context: certificateArn）"
+        required: false
+        default: ""
+        type: string
+      enableWaf:
+        description: "可选：是否在 ALB 前置 AWS WAF（CDK context: enableWaf）"
+        required: false
+        default: false
+        type: boolean
+  # 可选的自动触发：仅在发布分支/标签上部署，避免普通提交触发。
+  # 如不需要自动部署，可删除整个 push 块。
+  push:
+    branches:
+      - "release/**"
+    tags:
+      - "v*"
+
+# OIDC 假设角色所需的最小顶层权限。
+permissions:
+  id-token: write      # 通过 OIDC 申请短期 AWS 凭证所必需
+  contents: read       # 检出代码
+
+# 同一引用上避免并发部署，防止 CloudFormation 堆栈竞争。
+concurrency:
+  group: aws-deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: CDK Deploy (build image -> push ECR asset -> deploy)
+    runs-on: ubuntu-latest
+    # 可选：绑定到名为 aws 的 Environment 以启用审批/保护规则。
+    # environment: aws
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 解析有效区域：手动输入优先；为空则用仓库变量；再退回 us-east-1。
+      # push 触发（无 inputs）时直接走 vars / 默认值。
+      - name: Resolve deploy region
+        id: region
+        run: |
+          REGION="${{ github.event.inputs.region }}"
+          if [ -z "$REGION" ]; then
+            REGION="${{ vars.AWS_DEPLOY_REGION }}"
+          fi
+          if [ -z "$REGION" ]; then
+            REGION="us-east-1"
+          fi
+          echo "region=$REGION" >> "$GITHUB_OUTPUT"
+          echo "Resolved AWS region: $REGION"
+
+      # 通过 OIDC 假设部署角色，获取短期凭证（不使用长期访问密钥）。
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ steps.region.outputs.region }}
+          role-session-name: github-actions-kiro-gateway-deploy
+
+      # Node 用于运行 CDK CLI / ts-node。
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: infra/package-lock.json
+
+      # 可选：Python 仅在需要本地校验应用依赖时使用；CDK 部署本身不需要。
+      - name: Set up Python (optional)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      # Docker Buildx：CDK `fromAsset` 在部署期会构建镜像，需要可用的 Docker 构建环境。
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Install CDK project dependencies
+        working-directory: infra
+        run: npm ci
+
+      # 校验 CDK 项目可正常合成（提前发现配置/类型错误）。
+      - name: CDK synth (validate)
+        working-directory: infra
+        run: >-
+          npx cdk synth --all
+          -c region=${{ steps.region.outputs.region }}
+          -c stackName=${{ github.event.inputs.stackName || 'kiro-gateway' }}
+          -c minInstances=${{ github.event.inputs.minInstances || '2' }}
+          -c maxInstances=${{ github.event.inputs.maxInstances || '6' }}
+          ${{ github.event.inputs.certificateArn && format('-c certificateArn={0}', github.event.inputs.certificateArn) || '' }}
+          ${{ github.event.inputs.enableWaf == true && '-c enableWaf=true' || '' }}
+
+      # 提示：若目标账号/区域尚未 bootstrap，请先手动执行（每账号+区域一次）：
+      #   npx cdk bootstrap aws://<ACCOUNT_ID>/<REGION>
+      # 也可在受控环境中取消下面注释自动执行（需要更宽的 IAM 权限）：
+      # - name: CDK bootstrap (first time only)
+      #   working-directory: infra
+      #   run: npx cdk bootstrap
+
+      # 一键部署：CDK 通过 `fromAsset` 在此步构建镜像并推送到 ECR 资产仓库，
+      # 随后创建/更新全部 Stack 并在末尾输出 Load_Balancer 访问入口（需求 9.2、9.4）。
+      - name: CDK deploy --all
+        working-directory: infra
+        run: >-
+          npx cdk deploy --all --require-approval never
+          -c region=${{ steps.region.outputs.region }}
+          -c stackName=${{ github.event.inputs.stackName || 'kiro-gateway' }}
+          -c minInstances=${{ github.event.inputs.minInstances || '2' }}
+          -c maxInstances=${{ github.event.inputs.maxInstances || '6' }}
+          ${{ github.event.inputs.certificateArn && format('-c certificateArn={0}', github.event.inputs.certificateArn) || '' }}
+          ${{ github.event.inputs.enableWaf == true && '-c enableWaf=true' || '' }}

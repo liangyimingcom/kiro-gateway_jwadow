@@ -365,7 +365,7 @@ class TestLifespanAccountManagerInit:
         manager_created_with = {}
         
         class MockAccountManager:
-            def __init__(self, credentials_file, state_file):
+            def __init__(self, credentials_file, state_file, **kwargs):
                 manager_created_with["credentials_file"] = credentials_file
                 manager_created_with["state_file"] = state_file
                 self._accounts = {"test": MagicMock()}

@@ -40,6 +40,7 @@ from typing import Optional
 from loguru import logger
 
 from kiro.config import DEBUG_MODE, DEBUG_DIR
+from kiro.backends.local.debug_sink import LocalDebugLogSink
 
 
 class DebugLogger:
@@ -50,19 +51,33 @@ class DebugLogger:
     - off: does nothing
     - errors: buffers data, flushes to files only on errors
     - all: writes data immediately to files (as before)
+
+    Storage backend abstraction
+    ---------------------------
+    The destination for debug logs is provided by an injected
+    :class:`~kiro.backends.interfaces.DebugLogSink` (see design.md "组件与接口").
+    By default a :class:`~kiro.backends.local.debug_sink.LocalDebugLogSink` is
+    used, which targets the local ``debug_logs/`` directory exactly as before, so
+    the log content structure is unchanged. An alternative sink (e.g. the AWS
+    ``S3DebugLogSink``) can be injected at start-up via
+    :func:`configure_debug_sink` to redirect / archive debug logs without
+    touching the rest of the application.
     """
     _instance = None
 
-    def __new__(cls):
+    def __new__(cls, debug_sink=None):
         if cls._instance is None:
             cls._instance = super(DebugLogger, cls).__new__(cls)
             cls._instance._initialized = False
         return cls._instance
 
-    def __init__(self):
+    def __init__(self, debug_sink=None):
         if self._initialized:
             return
-        self.debug_dir = Path(DEBUG_DIR)
+        # Injected debug log sink (defaults to the local directory sink, which is
+        # behaviourally equivalent to the previous direct ``debug_logs/`` writes).
+        self._sink = debug_sink if debug_sink is not None else LocalDebugLogSink(DEBUG_DIR)
+        self.debug_dir = Path(self._sink.debug_dir)
         self._initialized = True
         
         # Buffers for "errors" mode
@@ -398,6 +413,53 @@ class DebugLogger:
             # Don't log error via logger to avoid recursion
             pass
 
+    # ==================== Storage backend abstraction ====================
+
+    def set_sink(self, debug_sink) -> None:
+        """
+        Inject / replace the :class:`DebugLogSink` used for debug log output.
+
+        Updates :attr:`debug_dir` from the new sink so that all local file
+        writes target the sink's directory. With the default local sink this is
+        behaviourally identical to the previous behaviour.
+
+        Args:
+            debug_sink: An object implementing the ``DebugLogSink`` protocol.
+        """
+        if debug_sink is None:
+            return
+        self._sink = debug_sink
+        sink_dir = getattr(debug_sink, "debug_dir", None)
+        if sink_dir is not None:
+            self.debug_dir = Path(sink_dir)
+
+    async def archive(self, request_id: str, payload: dict) -> None:
+        """
+        Archive an aggregated debug ``payload`` for ``request_id`` through the
+        injected :class:`DebugLogSink`.
+
+        This routes per-request debug archival through the storage abstraction
+        (the local sink writes ``debug_logs/<request_id>.json``; the AWS sink
+        archives to S3). Never raises, so it can't break the request path.
+        """
+        if not self._is_enabled():
+            return
+        try:
+            await self._sink.write(request_id, payload)
+        except Exception as e:  # pragma: no cover - defensive
+            logger.error(f"[DebugLogger] Failed to archive debug payload: {e}")
+
 
 # Global instance
 debug_logger = DebugLogger()
+
+
+def configure_debug_sink(debug_sink) -> None:
+    """
+    Configure the global :data:`debug_logger` to use ``debug_sink``.
+
+    Called at start-up by the application once the storage backend has been
+    created, so that debug logs are written through the selected backend's
+    :class:`DebugLogSink` (local directory or S3). Requirements 8.2.
+    """
+    debug_logger.set_sink(debug_sink)
