@@ -1,0 +1,20 @@
+# Node
+node_modules/
+npm-debug.log*
+yarn-error.log*
+
+# CDK
+cdk.out/
+cdk.context.json
+
+# TypeScript build output
+*.js
+*.d.ts
+!jest.config.js
+
+# Coverage / test artifacts
+coverage/
+
+# Misc
+.DS_Store
+*.tsbuildinfo

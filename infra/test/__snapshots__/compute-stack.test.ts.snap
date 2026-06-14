@@ -1,0 +1,1099 @@
+// Jest Snapshot v1, https://goo.gl/fbAQLP
+
+exports[`ComputeStack 合规测试 合成模板快照（toMatchSnapshot） 1`] = `
+{
+  "Outputs": {
+    "GatewayEndpoint": {
+      "Description": "Load_Balancer 访问入口完整 URL（部署成功后访问网关的入口地址）。",
+      "Export": {
+        "Name": "kiro-gateway-gateway-endpoint",
+      },
+      "Value": {
+        "Fn::Join": [
+          "",
+          [
+            "http://",
+            {
+              "Fn::GetAtt": [
+                "Alb16C2F182",
+                "DNSName",
+              ],
+            },
+          ],
+        ],
+      },
+    },
+    "LoadBalancerDns": {
+      "Description": "ALB 访问入口 DNS 名称。",
+      "Value": {
+        "Fn::GetAtt": [
+          "Alb16C2F182",
+          "DNSName",
+        ],
+      },
+    },
+  },
+  "Parameters": {
+    "BootstrapVersion": {
+      "Default": "/cdk-bootstrap/hnb659fds/version",
+      "Description": "Version of the CDK Bootstrap resources in this environment, automatically retrieved from SSM Parameter Store. [cdk:skip]",
+      "Type": "AWS::SSM::Parameter::Value<String>",
+    },
+  },
+  "Resources": {
+    "Alb16C2F182": {
+      "Properties": {
+        "LoadBalancerAttributes": [
+          {
+            "Key": "deletion_protection.enabled",
+            "Value": "false",
+          },
+          {
+            "Key": "idle_timeout.timeout_seconds",
+            "Value": "300",
+          },
+        ],
+        "Name": "kiro-gateway-gateway",
+        "Scheme": "internet-facing",
+        "SecurityGroups": [
+          {
+            "Fn::GetAtt": [
+              "AlbSecurityGroup580F65A6",
+              "GroupId",
+            ],
+          },
+        ],
+        "Subnets": [
+          {
+            "Fn::ImportValue": "kiro-gateway-network:ExportsOutputRefGatewayVpcpublicSubnet1SubnetEF9C1F5B61CB5E23",
+          },
+          {
+            "Fn::ImportValue": "kiro-gateway-network:ExportsOutputRefGatewayVpcpublicSubnet2Subnet39EADCAAE8144F7C",
+          },
+        ],
+        "Type": "application",
+      },
+      "Type": "AWS::ElasticLoadBalancingV2::LoadBalancer",
+    },
+    "AlbHttpListener00C8B33E": {
+      "Properties": {
+        "DefaultActions": [
+          {
+            "TargetGroupArn": {
+              "Ref": "AlbHttpListenerGatewayTargetsGroup9359DA62",
+            },
+            "Type": "forward",
+          },
+        ],
+        "LoadBalancerArn": {
+          "Ref": "Alb16C2F182",
+        },
+        "Port": 80,
+        "Protocol": "HTTP",
+      },
+      "Type": "AWS::ElasticLoadBalancingV2::Listener",
+    },
+    "AlbHttpListenerGatewayTargetsGroup9359DA62": {
+      "Properties": {
+        "HealthCheckIntervalSeconds": 30,
+        "HealthCheckPath": "/health",
+        "HealthCheckPort": "traffic-port",
+        "HealthCheckTimeoutSeconds": 10,
+        "HealthyThresholdCount": 2,
+        "Matcher": {
+          "HttpCode": "200",
+        },
+        "Port": 8000,
+        "Protocol": "HTTP",
+        "TargetGroupAttributes": [
+          {
+            "Key": "deregistration_delay.timeout_seconds",
+            "Value": "120",
+          },
+          {
+            "Key": "stickiness.enabled",
+            "Value": "false",
+          },
+        ],
+        "TargetType": "ip",
+        "UnhealthyThresholdCount": 3,
+        "VpcId": {
+          "Fn::ImportValue": "kiro-gateway-network:ExportsOutputRefGatewayVpcFA33972A0C50181D",
+        },
+      },
+      "Type": "AWS::ElasticLoadBalancingV2::TargetGroup",
+    },
+    "AlbSecurityGroup580F65A6": {
+      "Properties": {
+        "GroupDescription": "Automatically created Security Group for ELB kirogatewaycomputeAlbF6D67688",
+        "SecurityGroupIngress": [
+          {
+            "CidrIp": "0.0.0.0/0",
+            "Description": "Allow from anyone on port 80",
+            "FromPort": 80,
+            "IpProtocol": "tcp",
+            "ToPort": 80,
+          },
+        ],
+        "VpcId": {
+          "Fn::ImportValue": "kiro-gateway-network:ExportsOutputRefGatewayVpcFA33972A0C50181D",
+        },
+      },
+      "Type": "AWS::EC2::SecurityGroup",
+    },
+    "AlbSecurityGrouptokirogatewaycomputeServiceSecurityGroup0E36DC9A8000527A7339": {
+      "Properties": {
+        "Description": "Load balancer to target",
+        "DestinationSecurityGroupId": {
+          "Fn::GetAtt": [
+            "ServiceSecurityGroupC96ED6A7",
+            "GroupId",
+          ],
+        },
+        "FromPort": 8000,
+        "GroupId": {
+          "Fn::GetAtt": [
+            "AlbSecurityGroup580F65A6",
+            "GroupId",
+          ],
+        },
+        "IpProtocol": "tcp",
+        "ToPort": 8000,
+      },
+      "Type": "AWS::EC2::SecurityGroupEgress",
+    },
+    "ClusterEB0386A7": {
+      "Properties": {
+        "ClusterName": "kiro-gateway-gateway",
+        "ClusterSettings": [
+          {
+            "Name": "containerInsights",
+            "Value": "enabled",
+          },
+        ],
+      },
+      "Type": "AWS::ECS::Cluster",
+    },
+    "LogGroupF5B46931": {
+      "DeletionPolicy": "Retain",
+      "Properties": {
+        "LogGroupName": "/ecs/kiro-gateway-gateway",
+        "RetentionInDays": 30,
+      },
+      "Type": "AWS::Logs::LogGroup",
+      "UpdateReplacePolicy": "Retain",
+    },
+    "RolesExecutionRoleAB9762F7": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "ecs-tasks.amazonaws.com",
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "Description": "kiro-gateway Gateway 任务的 ECS 执行角色",
+        "ManagedPolicyArns": [
+          {
+            "Fn::Join": [
+              "",
+              [
+                "arn:",
+                {
+                  "Ref": "AWS::Partition",
+                },
+                ":iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy",
+              ],
+            ],
+          },
+        ],
+        "RoleName": "kiro-gateway-gateway-exec",
+      },
+      "Type": "AWS::IAM::Role",
+    },
+    "RolesExecutionRoleDefaultPolicyED4176E7": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "secretsmanager:GetSecretValue",
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::ImportValue": "kiro-gateway-data:ExportsOutputRefProxyApiKeySecret52630A5C29FEF64E",
+                },
+                {
+                  "Fn::ImportValue": "kiro-gateway-data:ExportsOutputRefCredentialsJsonSecret1DF5C77F9ED7EDE3",
+                },
+              ],
+              "Sid": "ExecSecretsRead",
+            },
+            {
+              "Action": [
+                "kms:Decrypt",
+                "kms:DescribeKey",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::ImportValue": "kiro-gateway-data:ExportsOutputFnGetAttDataKey17AFBB84ArnCE2A1BC6",
+              },
+              "Sid": "ExecKeyDecrypt",
+            },
+            {
+              "Action": [
+                "ecr:BatchCheckLayerAvailability",
+                "ecr:GetDownloadUrlForLayer",
+                "ecr:BatchGetImage",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":ecr:us-east-1:123456789012:repository/cdk-hnb659fds-container-assets-123456789012-us-east-1",
+                  ],
+                ],
+              },
+            },
+            {
+              "Action": "ecr:GetAuthorizationToken",
+              "Effect": "Allow",
+              "Resource": "*",
+            },
+            {
+              "Action": [
+                "logs:CreateLogStream",
+                "logs:PutLogEvents",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "LogGroupF5B46931",
+                  "Arn",
+                ],
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "RolesExecutionRoleDefaultPolicyED4176E7",
+        "Roles": [
+          {
+            "Ref": "RolesExecutionRoleAB9762F7",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "RolesTaskRoleDefaultPolicy160E6CAA": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "dynamodb:GetItem",
+                "dynamodb:BatchGetItem",
+                "dynamodb:Query",
+                "dynamodb:Scan",
+                "dynamodb:PutItem",
+                "dynamodb:UpdateItem",
+                "dynamodb:DeleteItem",
+                "dynamodb:BatchWriteItem",
+                "dynamodb:ConditionCheckItem",
+                "dynamodb:DescribeTable",
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::ImportValue": "kiro-gateway-data:ExportsOutputFnGetAttStateTable9728C7E5ArnC7425759",
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      {
+                        "Fn::ImportValue": "kiro-gateway-data:ExportsOutputFnGetAttStateTable9728C7E5ArnC7425759",
+                      },
+                      "/index/*",
+                    ],
+                  ],
+                },
+              ],
+              "Sid": "StateStoreReadWrite",
+            },
+            {
+              "Action": [
+                "secretsmanager:GetSecretValue",
+                "secretsmanager:DescribeSecret",
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::ImportValue": "kiro-gateway-data:ExportsOutputRefProxyApiKeySecret52630A5C29FEF64E",
+                },
+                {
+                  "Fn::ImportValue": "kiro-gateway-data:ExportsOutputRefCredentialsJsonSecret1DF5C77F9ED7EDE3",
+                },
+              ],
+              "Sid": "FixedSecretsRead",
+            },
+            {
+              "Action": "secretsmanager:PutSecretValue",
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::ImportValue": "kiro-gateway-data:ExportsOutputRefCredentialsJsonSecret1DF5C77F9ED7EDE3",
+              },
+              "Sid": "CredentialsJsonWrite",
+            },
+            {
+              "Action": [
+                "secretsmanager:GetSecretValue",
+                "secretsmanager:PutSecretValue",
+                "secretsmanager:CreateSecret",
+                "secretsmanager:DescribeSecret",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":secretsmanager:us-east-1:123456789012:secret:kiro-gateway/account/*",
+                  ],
+                ],
+              },
+              "Sid": "AccountTokenSecrets",
+            },
+            {
+              "Action": [
+                "ssm:GetParameter",
+                "ssm:GetParameters",
+                "ssm:GetParametersByPath",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":ssm:us-east-1:123456789012:parameter/kiro-gateway/config/*",
+                  ],
+                ],
+              },
+              "Sid": "ConfigParameters",
+            },
+            {
+              "Action": [
+                "s3:GetObject",
+                "s3:GetBucketLocation",
+                "s3:ListBucket",
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::ImportValue": "kiro-gateway-data:ExportsOutputFnGetAttConfigBucket2112C5ECArn673941B5",
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      {
+                        "Fn::ImportValue": "kiro-gateway-data:ExportsOutputFnGetAttConfigBucket2112C5ECArn673941B5",
+                      },
+                      "/*",
+                    ],
+                  ],
+                },
+              ],
+              "Sid": "ConfigBucketRead",
+            },
+            {
+              "Action": [
+                "s3:PutObject",
+                "s3:AbortMultipartUpload",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    {
+                      "Fn::ImportValue": "kiro-gateway-data:ExportsOutputFnGetAttDebugLogsBucket58B78653ArnA3210056",
+                    },
+                    "/*",
+                  ],
+                ],
+              },
+              "Sid": "DebugBucketWrite",
+            },
+            {
+              "Action": [
+                "kms:Decrypt",
+                "kms:Encrypt",
+                "kms:ReEncrypt*",
+                "kms:GenerateDataKey*",
+                "kms:DescribeKey",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::ImportValue": "kiro-gateway-data:ExportsOutputFnGetAttDataKey17AFBB84ArnCE2A1BC6",
+              },
+              "Sid": "DataKeyUse",
+            },
+            {
+              "Action": "cloudwatch:PutMetricData",
+              "Condition": {
+                "StringEquals": {
+                  "cloudwatch:namespace": "kiro-gateway/gateway",
+                },
+              },
+              "Effect": "Allow",
+              "Resource": "*",
+              "Sid": "PutCustomMetrics",
+            },
+            {
+              "Action": [
+                "logs:CreateLogStream",
+                "logs:PutLogEvents",
+                "logs:DescribeLogStreams",
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":logs:us-east-1:123456789012:log-group:/ecs/kiro-gateway*",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":logs:us-east-1:123456789012:log-group:/ecs/kiro-gateway*:*",
+                    ],
+                  ],
+                },
+              ],
+              "Sid": "AppLogs",
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "RolesTaskRoleDefaultPolicy160E6CAA",
+        "Roles": [
+          {
+            "Ref": "RolesTaskRoleF8D8DD59",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "RolesTaskRoleF8D8DD59": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "ecs-tasks.amazonaws.com",
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "Description": "kiro-gateway Gateway 容器应用的最小权限任务角色",
+        "RoleName": "kiro-gateway-gateway-task",
+      },
+      "Type": "AWS::IAM::Role",
+    },
+    "ServiceD69D759B": {
+      "DependsOn": [
+        "AlbHttpListenerGatewayTargetsGroup9359DA62",
+        "AlbHttpListener00C8B33E",
+        "RolesTaskRoleDefaultPolicy160E6CAA",
+        "RolesTaskRoleF8D8DD59",
+      ],
+      "Properties": {
+        "Cluster": {
+          "Ref": "ClusterEB0386A7",
+        },
+        "DeploymentConfiguration": {
+          "Alarms": {
+            "AlarmNames": [],
+            "Enable": false,
+            "Rollback": false,
+          },
+          "DeploymentCircuitBreaker": {
+            "Enable": true,
+            "Rollback": true,
+          },
+          "MaximumPercent": 200,
+          "MinimumHealthyPercent": 100,
+        },
+        "DeploymentController": {
+          "Type": "ECS",
+        },
+        "DesiredCount": 2,
+        "EnableECSManagedTags": false,
+        "EnableExecuteCommand": false,
+        "HealthCheckGracePeriodSeconds": 120,
+        "LaunchType": "FARGATE",
+        "LoadBalancers": [
+          {
+            "ContainerName": "gateway",
+            "ContainerPort": 8000,
+            "TargetGroupArn": {
+              "Ref": "AlbHttpListenerGatewayTargetsGroup9359DA62",
+            },
+          },
+        ],
+        "NetworkConfiguration": {
+          "AwsvpcConfiguration": {
+            "AssignPublicIp": "DISABLED",
+            "SecurityGroups": [
+              {
+                "Fn::GetAtt": [
+                  "ServiceSecurityGroupC96ED6A7",
+                  "GroupId",
+                ],
+              },
+            ],
+            "Subnets": [
+              {
+                "Fn::ImportValue": "kiro-gateway-network:ExportsOutputRefGatewayVpcprivateSubnet1SubnetC4CF5DA168F40133",
+              },
+              {
+                "Fn::ImportValue": "kiro-gateway-network:ExportsOutputRefGatewayVpcprivateSubnet2Subnet2DE5CB32A37333F1",
+              },
+            ],
+          },
+        },
+        "ServiceName": "kiro-gateway-gateway",
+        "TaskDefinition": {
+          "Ref": "TaskDef54694570",
+        },
+      },
+      "Type": "AWS::ECS::Service",
+    },
+    "ServiceSecurityGroupC96ED6A7": {
+      "DependsOn": [
+        "RolesTaskRoleDefaultPolicy160E6CAA",
+        "RolesTaskRoleF8D8DD59",
+      ],
+      "Properties": {
+        "GroupDescription": "kiro-gateway-compute/Service/SecurityGroup",
+        "SecurityGroupEgress": [
+          {
+            "CidrIp": "0.0.0.0/0",
+            "Description": "Allow all outbound traffic by default",
+            "IpProtocol": "-1",
+          },
+        ],
+        "VpcId": {
+          "Fn::ImportValue": "kiro-gateway-network:ExportsOutputRefGatewayVpcFA33972A0C50181D",
+        },
+      },
+      "Type": "AWS::EC2::SecurityGroup",
+    },
+    "ServiceSecurityGroupfromkirogatewaycomputeAlbSecurityGroupAB39F94480007FC6B0B8": {
+      "DependsOn": [
+        "RolesTaskRoleDefaultPolicy160E6CAA",
+        "RolesTaskRoleF8D8DD59",
+      ],
+      "Properties": {
+        "Description": "Load balancer to target",
+        "FromPort": 8000,
+        "GroupId": {
+          "Fn::GetAtt": [
+            "ServiceSecurityGroupC96ED6A7",
+            "GroupId",
+          ],
+        },
+        "IpProtocol": "tcp",
+        "SourceSecurityGroupId": {
+          "Fn::GetAtt": [
+            "AlbSecurityGroup580F65A6",
+            "GroupId",
+          ],
+        },
+        "ToPort": 8000,
+      },
+      "Type": "AWS::EC2::SecurityGroupIngress",
+    },
+    "ServiceTaskCountTarget23E25614": {
+      "DependsOn": [
+        "RolesTaskRoleDefaultPolicy160E6CAA",
+        "RolesTaskRoleF8D8DD59",
+      ],
+      "Properties": {
+        "MaxCapacity": 6,
+        "MinCapacity": 2,
+        "ResourceId": {
+          "Fn::Join": [
+            "",
+            [
+              "service/",
+              {
+                "Ref": "ClusterEB0386A7",
+              },
+              "/",
+              {
+                "Fn::GetAtt": [
+                  "ServiceD69D759B",
+                  "Name",
+                ],
+              },
+            ],
+          ],
+        },
+        "RoleARN": {
+          "Fn::Join": [
+            "",
+            [
+              "arn:",
+              {
+                "Ref": "AWS::Partition",
+              },
+              ":iam::123456789012:role/aws-service-role/ecs.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_ECSService",
+            ],
+          ],
+        },
+        "ScalableDimension": "ecs:service:DesiredCount",
+        "ServiceNamespace": "ecs",
+      },
+      "Type": "AWS::ApplicationAutoScaling::ScalableTarget",
+    },
+    "ServiceTaskCountTargetCpuTargetTracking48B6E667": {
+      "DependsOn": [
+        "RolesTaskRoleDefaultPolicy160E6CAA",
+        "RolesTaskRoleF8D8DD59",
+      ],
+      "Properties": {
+        "PolicyName": "kirogatewaycomputeServiceTaskCountTargetCpuTargetTracking5B78DF61",
+        "PolicyType": "TargetTrackingScaling",
+        "ScalingTargetId": {
+          "Ref": "ServiceTaskCountTarget23E25614",
+        },
+        "TargetTrackingScalingPolicyConfiguration": {
+          "PredefinedMetricSpecification": {
+            "PredefinedMetricType": "ECSServiceAverageCPUUtilization",
+          },
+          "ScaleInCooldown": 600,
+          "ScaleOutCooldown": 180,
+          "TargetValue": 70,
+        },
+      },
+      "Type": "AWS::ApplicationAutoScaling::ScalingPolicy",
+    },
+    "ServiceTaskCountTargetRequestTargetTracking181CD859": {
+      "DependsOn": [
+        "RolesTaskRoleDefaultPolicy160E6CAA",
+        "RolesTaskRoleF8D8DD59",
+      ],
+      "Properties": {
+        "PolicyName": "kirogatewaycomputeServiceTaskCountTargetRequestTargetTracking69C442D7",
+        "PolicyType": "TargetTrackingScaling",
+        "ScalingTargetId": {
+          "Ref": "ServiceTaskCountTarget23E25614",
+        },
+        "TargetTrackingScalingPolicyConfiguration": {
+          "PredefinedMetricSpecification": {
+            "PredefinedMetricType": "ALBRequestCountPerTarget",
+            "ResourceLabel": {
+              "Fn::Join": [
+                "",
+                [
+                  {
+                    "Fn::Select": [
+                      1,
+                      {
+                        "Fn::Split": [
+                          "/",
+                          {
+                            "Ref": "AlbHttpListener00C8B33E",
+                          },
+                        ],
+                      },
+                    ],
+                  },
+                  "/",
+                  {
+                    "Fn::Select": [
+                      2,
+                      {
+                        "Fn::Split": [
+                          "/",
+                          {
+                            "Ref": "AlbHttpListener00C8B33E",
+                          },
+                        ],
+                      },
+                    ],
+                  },
+                  "/",
+                  {
+                    "Fn::Select": [
+                      3,
+                      {
+                        "Fn::Split": [
+                          "/",
+                          {
+                            "Ref": "AlbHttpListener00C8B33E",
+                          },
+                        ],
+                      },
+                    ],
+                  },
+                  "/",
+                  {
+                    "Fn::GetAtt": [
+                      "AlbHttpListenerGatewayTargetsGroup9359DA62",
+                      "TargetGroupFullName",
+                    ],
+                  },
+                ],
+              ],
+            },
+          },
+          "ScaleInCooldown": 600,
+          "ScaleOutCooldown": 180,
+          "TargetValue": 1000,
+        },
+      },
+      "Type": "AWS::ApplicationAutoScaling::ScalingPolicy",
+    },
+    "TaskDef54694570": {
+      "Properties": {
+        "ContainerDefinitions": [
+          {
+            "Environment": [
+              {
+                "Name": "STORAGE_BACKEND",
+                "Value": "aws",
+              },
+              {
+                "Name": "STACK_NAME",
+                "Value": "kiro-gateway",
+              },
+              {
+                "Name": "AWS_REGION",
+                "Value": "us-east-1",
+              },
+              {
+                "Name": "GATEWAY_STATE_TABLE",
+                "Value": {
+                  "Fn::ImportValue": "kiro-gateway-data:ExportsOutputRefStateTable9728C7E50DCA14B8",
+                },
+              },
+              {
+                "Name": "DEBUG_S3_BUCKET",
+                "Value": {
+                  "Fn::ImportValue": "kiro-gateway-data:ExportsOutputRefDebugLogsBucket58B786534BE1FCE5",
+                },
+              },
+              {
+                "Name": "CONFIG_S3_BUCKET",
+                "Value": {
+                  "Fn::ImportValue": "kiro-gateway-data:ExportsOutputRefConfigBucket2112C5EC685752CB",
+                },
+              },
+              {
+                "Name": "CONFIG_PARAMETER_PREFIX",
+                "Value": "/kiro-gateway/config",
+              },
+              {
+                "Name": "ACCOUNT_SECRET_PREFIX",
+                "Value": "kiro-gateway/account",
+              },
+              {
+                "Name": "PROXY_API_KEY_SECRET",
+                "Value": {
+                  "Fn::Join": [
+                    "-",
+                    [
+                      {
+                        "Fn::Select": [
+                          0,
+                          {
+                            "Fn::Split": [
+                              "-",
+                              {
+                                "Fn::Select": [
+                                  6,
+                                  {
+                                    "Fn::Split": [
+                                      ":",
+                                      {
+                                        "Fn::ImportValue": "kiro-gateway-data:ExportsOutputRefProxyApiKeySecret52630A5C29FEF64E",
+                                      },
+                                    ],
+                                  },
+                                ],
+                              },
+                            ],
+                          },
+                        ],
+                      },
+                      {
+                        "Fn::Select": [
+                          1,
+                          {
+                            "Fn::Split": [
+                              "-",
+                              {
+                                "Fn::Select": [
+                                  6,
+                                  {
+                                    "Fn::Split": [
+                                      ":",
+                                      {
+                                        "Fn::ImportValue": "kiro-gateway-data:ExportsOutputRefProxyApiKeySecret52630A5C29FEF64E",
+                                      },
+                                    ],
+                                  },
+                                ],
+                              },
+                            ],
+                          },
+                        ],
+                      },
+                      {
+                        "Fn::Select": [
+                          2,
+                          {
+                            "Fn::Split": [
+                              "-",
+                              {
+                                "Fn::Select": [
+                                  6,
+                                  {
+                                    "Fn::Split": [
+                                      ":",
+                                      {
+                                        "Fn::ImportValue": "kiro-gateway-data:ExportsOutputRefProxyApiKeySecret52630A5C29FEF64E",
+                                      },
+                                    ],
+                                  },
+                                ],
+                              },
+                            ],
+                          },
+                        ],
+                      },
+                      {
+                        "Fn::Select": [
+                          3,
+                          {
+                            "Fn::Split": [
+                              "-",
+                              {
+                                "Fn::Select": [
+                                  6,
+                                  {
+                                    "Fn::Split": [
+                                      ":",
+                                      {
+                                        "Fn::ImportValue": "kiro-gateway-data:ExportsOutputRefProxyApiKeySecret52630A5C29FEF64E",
+                                      },
+                                    ],
+                                  },
+                                ],
+                              },
+                            ],
+                          },
+                        ],
+                      },
+                    ],
+                  ],
+                },
+              },
+              {
+                "Name": "CREDENTIALS_JSON_SECRET",
+                "Value": {
+                  "Fn::Join": [
+                    "-",
+                    [
+                      {
+                        "Fn::Select": [
+                          0,
+                          {
+                            "Fn::Split": [
+                              "-",
+                              {
+                                "Fn::Select": [
+                                  6,
+                                  {
+                                    "Fn::Split": [
+                                      ":",
+                                      {
+                                        "Fn::ImportValue": "kiro-gateway-data:ExportsOutputRefCredentialsJsonSecret1DF5C77F9ED7EDE3",
+                                      },
+                                    ],
+                                  },
+                                ],
+                              },
+                            ],
+                          },
+                        ],
+                      },
+                      {
+                        "Fn::Select": [
+                          1,
+                          {
+                            "Fn::Split": [
+                              "-",
+                              {
+                                "Fn::Select": [
+                                  6,
+                                  {
+                                    "Fn::Split": [
+                                      ":",
+                                      {
+                                        "Fn::ImportValue": "kiro-gateway-data:ExportsOutputRefCredentialsJsonSecret1DF5C77F9ED7EDE3",
+                                      },
+                                    ],
+                                  },
+                                ],
+                              },
+                            ],
+                          },
+                        ],
+                      },
+                      {
+                        "Fn::Select": [
+                          2,
+                          {
+                            "Fn::Split": [
+                              "-",
+                              {
+                                "Fn::Select": [
+                                  6,
+                                  {
+                                    "Fn::Split": [
+                                      ":",
+                                      {
+                                        "Fn::ImportValue": "kiro-gateway-data:ExportsOutputRefCredentialsJsonSecret1DF5C77F9ED7EDE3",
+                                      },
+                                    ],
+                                  },
+                                ],
+                              },
+                            ],
+                          },
+                        ],
+                      },
+                    ],
+                  ],
+                },
+              },
+              {
+                "Name": "STREAMING_READ_TIMEOUT",
+                "Value": "300",
+              },
+              {
+                "Name": "GRACEFUL_SHUTDOWN_TIMEOUT",
+                "Value": "120",
+              },
+            ],
+            "Essential": true,
+            "Image": {
+              "Fn::Sub": "123456789012.dkr.ecr.us-east-1.\${AWS::URLSuffix}/cdk-hnb659fds-container-assets-123456789012-us-east-1:a7b23f51c149d2fb22bbc0ba60f3a90dfc60507e00beee235c4c2ec854032bbf",
+            },
+            "LogConfiguration": {
+              "LogDriver": "awslogs",
+              "Options": {
+                "awslogs-group": {
+                  "Ref": "LogGroupF5B46931",
+                },
+                "awslogs-region": "us-east-1",
+                "awslogs-stream-prefix": "gateway",
+              },
+            },
+            "Name": "gateway",
+            "PortMappings": [
+              {
+                "ContainerPort": 8000,
+                "Protocol": "tcp",
+              },
+            ],
+            "StopTimeout": 120,
+          },
+        ],
+        "Cpu": "512",
+        "ExecutionRoleArn": {
+          "Fn::GetAtt": [
+            "RolesExecutionRoleAB9762F7",
+            "Arn",
+          ],
+        },
+        "Family": "kiro-gateway-gateway",
+        "Memory": "1024",
+        "NetworkMode": "awsvpc",
+        "RequiresCompatibilities": [
+          "FARGATE",
+        ],
+        "TaskRoleArn": {
+          "Fn::GetAtt": [
+            "RolesTaskRoleF8D8DD59",
+            "Arn",
+          ],
+        },
+      },
+      "Type": "AWS::ECS::TaskDefinition",
+    },
+  },
+  "Rules": {
+    "CheckBootstrapVersion": {
+      "Assertions": [
+        {
+          "Assert": {
+            "Fn::Not": [
+              {
+                "Fn::Contains": [
+                  [
+                    "1",
+                    "2",
+                    "3",
+                    "4",
+                    "5",
+                  ],
+                  {
+                    "Ref": "BootstrapVersion",
+                  },
+                ],
+              },
+            ],
+          },
+          "AssertDescription": "CDK bootstrap stack version 6 required. Please run 'cdk bootstrap' with a recent version of the CDK CLI.",
+        },
+      ],
+    },
+  },
+}
+`;

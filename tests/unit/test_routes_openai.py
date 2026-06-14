@@ -1250,31 +1250,39 @@ class TestTruncationRecoveryEdgeCases:
         assert stats["tool_truncations"] >= 1
         
         print("Action: Disabling recovery...")
-        with patch.dict(os.environ, {"TRUNCATION_RECOVERY": "false"}):
-            from importlib import reload
-            from kiro import config
+        from importlib import reload
+        from kiro import config
+        try:
+            with patch.dict(os.environ, {"TRUNCATION_RECOVERY": "false"}):
+                reload(config)
+
+                print("Action: Processing tool_result with recovery disabled...")
+                from kiro.truncation_recovery import should_inject_recovery
+                from kiro.truncation_state import get_tool_truncation
+
+                messages = [
+                    ChatMessage(role="tool", tool_call_id=tool_call_id, content="Result")
+                ]
+
+                modified_messages = []
+                for msg in messages:
+                    if msg.role == "tool" and msg.tool_call_id and should_inject_recovery():
+                        # This branch won't execute because recovery is disabled
+                        truncation_info = get_tool_truncation(msg.tool_call_id)
+                        if truncation_info:
+                            pass
+                    modified_messages.append(msg)
+
+                print("Checking: No modification occurred...")
+                assert modified_messages[0].content == "Result"
+                assert "[API Limitation]" not in modified_messages[0].content
+        finally:
+            # Test isolation: the patch.dict() above restores os.environ on exit,
+            # but kiro.config caches the parsed TRUNCATION_RECOVERY flag at import
+            # time. Reload config here so the restored (default) environment takes
+            # effect again and this test does not leak TRUNCATION_RECOVERY=false
+            # into subsequent tests (which made test ordering matter).
             reload(config)
-            
-            print("Action: Processing tool_result with recovery disabled...")
-            from kiro.truncation_recovery import should_inject_recovery
-            from kiro.truncation_state import get_tool_truncation
-            
-            messages = [
-                ChatMessage(role="tool", tool_call_id=tool_call_id, content="Result")
-            ]
-            
-            modified_messages = []
-            for msg in messages:
-                if msg.role == "tool" and msg.tool_call_id and should_inject_recovery():
-                    # This branch won't execute because recovery is disabled
-                    truncation_info = get_tool_truncation(msg.tool_call_id)
-                    if truncation_info:
-                        pass
-                modified_messages.append(msg)
-            
-            print("Checking: No modification occurred...")
-            assert modified_messages[0].content == "Result"
-            assert "[API Limitation]" not in modified_messages[0].content
         
         print("Checking: Cache entry still exists (not cleaned up)...")
         # Note: get_tool_truncation() was NOT called, so entry should still be there

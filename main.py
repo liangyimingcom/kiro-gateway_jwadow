@@ -65,6 +65,7 @@ from kiro.config import (
     KIRO_CLI_DB_FILE,
     PROXY_API_KEY,
     LOG_LEVEL,
+    LOG_FORMAT,
     SERVER_HOST,
     SERVER_PORT,
     DEFAULT_SERVER_HOST,
@@ -84,20 +85,39 @@ from kiro.auth import KiroAuthManager
 from kiro.cache import ModelInfoCache
 from kiro.model_resolver import ModelResolver
 from kiro.account_manager import AccountManager
+from kiro.backends.factory import create_backend
+from kiro.config import set_config_provider
+from kiro.debug_logger import configure_debug_sink
 from kiro.routes_openai import router as openai_router
 from kiro.routes_anthropic import router as anthropic_router
 from kiro.exceptions import validation_exception_handler
 from kiro.debug_middleware import DebugLoggerMiddleware
+from kiro.shutdown import (
+    ShutdownState,
+    GracefulShutdownMiddleware,
+    drain_on_shutdown,
+    get_graceful_shutdown_timeout,
+)
+from kiro.request_context import (
+    RequestContextMiddleware,
+    configure_logging,
+    set_log_redactor,
+)
+
+
+# --- Graceful Shutdown State ---
+# Shared in-flight request tracker used by GracefulShutdownMiddleware and the
+# lifespan shutdown hook to drain requests (including SSE) on SIGTERM (Req 4.5).
+shutdown_state = ShutdownState()
 
 
 # --- Loguru Configuration ---
-logger.remove()
-logger.add(
-    sys.stderr,
-    level=LOG_LEVEL,
-    colorize=True,
-    format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>"
-)
+# Structured stdout logging (JSON) for CloudWatch ingestion with per-request
+# correlation ids and secret redaction (Requirements 8.1, 8.7, 6.5). The "auto"
+# format resolves to JSON on the AWS backend and to a human-readable line for
+# local development. The SecretProvider used for redaction is wired in later
+# (in the lifespan) once the storage backend exists.
+configure_logging(level=LOG_LEVEL, log_format=LOG_FORMAT)
 
 
 class InterceptHandler(logging.Handler):
@@ -333,6 +353,30 @@ async def lifespan(app: FastAPI):
     """
     logger.info("Starting application... Creating state managers.")
     
+    # Expose the graceful-shutdown tracker on app.state so the draining
+    # middleware and shutdown hook share the same in-flight counter (Req 4.5).
+    # Reset to a fresh accepting state on every startup so a (re)started app
+    # never inherits a stale "shutting down" flag from a previous lifecycle.
+    shutdown_state.reset()
+    app.state.shutdown_state = shutdown_state
+    
+    # ==============================================================================
+    # Storage backend bundle (local | aws)
+    # ==============================================================================
+    # Select and assemble the storage backend implementations (config / secrets /
+    # shared state / refresh coordination / debug log sink) based on the
+    # STORAGE_BACKEND environment variable. With the default 'local' backend this
+    # is behaviourally equivalent to the previous single-host gateway.
+    backend = create_backend()
+    app.state.backend = backend
+    # Route debug logs through the selected backend's sink (local directory by
+    # default; S3 archival for the aws backend).
+    configure_debug_sink(backend.debug_sink)
+    # Wire the backend's SecretProvider into the logging sink so that all log
+    # output is redacted (secret values never appear in clear text) before being
+    # written to stdout (Requirements 6.5).
+    set_log_redactor(backend.secret_provider)
+    
     # Create shared HTTP client with connection pooling
     # This reduces memory usage and enables connection reuse across requests
     # Limits: max 100 total connections, max 20 keep-alive connections
@@ -455,7 +499,10 @@ async def lifespan(app: FastAPI):
     # ==============================================================================
     app.state.account_manager = AccountManager(
         credentials_file=ACCOUNTS_CONFIG_FILE,
-        state_file=ACCOUNTS_STATE_FILE
+        state_file=ACCOUNTS_STATE_FILE,
+        state_store=backend.state_store,
+        secret_provider=backend.secret_provider,
+        coordinator=backend.coordinator,
     )
     
     # Load credentials and state
@@ -514,6 +561,12 @@ async def lifespan(app: FastAPI):
     # Graceful shutdown
     logger.info("Shutting down application...")
     
+    # Stop accepting new requests and drain in-flight ones (including SSE
+    # streams) before tearing down state managers / HTTP client (Req 4.5).
+    # On SIGTERM this runs after uvicorn's own graceful shutdown window, acting
+    # as an application-level backstop bounded by the same grace period.
+    await drain_on_shutdown(shutdown_state)
+    
     # Cancel background task
     save_task.cancel()
     try:
@@ -542,6 +595,12 @@ app = FastAPI(
 )
 
 
+# --- Graceful Shutdown Middleware ---
+# Tracks in-flight requests and rejects new ones with 503 once shutdown begins,
+# allowing existing requests (including SSE streams) to drain on SIGTERM (Req 4.5).
+app.add_middleware(GracefulShutdownMiddleware, state=shutdown_state)
+
+
 # --- CORS Middleware ---
 # Allow CORS for all origins to support browser clients
 # and tools that send preflight OPTIONS requests
@@ -558,6 +617,14 @@ app.add_middleware(
 # Initializes debug logging BEFORE Pydantic validation
 # This allows capturing validation errors (422) in debug logs
 app.add_middleware(DebugLoggerMiddleware)
+
+
+# --- Request Correlation Middleware ---
+# Registered LAST so it is the OUTERMOST middleware: it assigns a request_id
+# (reusing X-Request-Id / X-Amzn-Trace-Id when present) before any other
+# middleware or handler runs, so every log line for the request is correlated,
+# and echoes the id back on the response (Requirements 8.7).
+app.add_middleware(RequestContextMiddleware)
 
 
 # --- Validation Error Handler Registration ---
@@ -734,6 +801,17 @@ if __name__ == "__main__":
     # Parse CLI arguments first (handles --version, --help without requiring config)
     args = parse_cli_args()
     
+    # Inject the configuration provider from the selected storage backend so that
+    # configuration is sourced through the abstraction layer (local env / .env by
+    # default, SSM Parameter Store for the aws backend). Behaviourally identical
+    # to the previous os.getenv loading for the local backend.
+    try:
+        _startup_backend = create_backend()
+        set_config_provider(_startup_backend.config_provider)
+        configure_debug_sink(_startup_backend.debug_sink)
+    except Exception as e:
+        logger.warning(f"Falling back to default configuration provider: {e}")
+    
     # Run configuration validation before starting server
     validate_configuration()
     
@@ -748,10 +826,17 @@ if __name__ == "__main__":
     
     logger.info(f"Starting Uvicorn server on {final_host}:{final_port}...")
     
+    # Resolve the configurable graceful-shutdown grace period (Req 4.5). uvicorn
+    # uses this on SIGTERM to stop accepting new connections and wait for ongoing
+    # requests (including SSE streams) to finish before forcing exit.
+    graceful_timeout = int(get_graceful_shutdown_timeout())
+    logger.debug(f"Graceful shutdown timeout: {graceful_timeout}s")
+    
     # Use string reference to avoid double module import
     uvicorn.run(
         "main:app",
         host=final_host,
         port=final_port,
         log_config=UVICORN_LOG_CONFIG,
+        timeout_graceful_shutdown=graceful_timeout,
     )

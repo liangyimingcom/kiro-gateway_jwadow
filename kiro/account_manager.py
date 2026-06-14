@@ -62,6 +62,14 @@ from kiro.config import (
 from kiro.utils import get_kiro_headers
 from kiro.account_errors import ErrorType
 from kiro.http_client import KiroHttpClient
+from kiro.backends.interfaces import (
+    StateStore,
+    AccountState,
+    AccountStatsState,
+    SecretProvider,
+    TokenRefreshCoordinator,
+)
+from kiro.backends.local.state_store import LocalStateStore
 
 
 def _is_runtime_endpoint(auth_manager: KiroAuthManager) -> bool:
@@ -195,16 +203,42 @@ class AccountManager:
         >>> await manager.report_success(account.id, "claude-opus-4.5")
     """
     
-    def __init__(self, credentials_file: str, state_file: str):
+    def __init__(
+        self,
+        credentials_file: str,
+        state_file: str,
+        state_store: Optional[StateStore] = None,
+        secret_provider: Optional[SecretProvider] = None,
+        coordinator: Optional[TokenRefreshCoordinator] = None,
+    ):
         """
         Initialize AccountManager.
         
         Args:
             credentials_file: Path to credentials.json
             state_file: Path to state.json
+            state_store: Optional shared-state backend (:class:`StateStore`).
+                When ``None`` a :class:`LocalStateStore` bound to ``state_file``
+                is used, which is behaviourally equivalent to the previous
+                ``state.json`` handling (Requirements 7.1, 7.2). An alternative
+                backend (e.g. DynamoDB) can be injected to share runtime state
+                across instances.
+            secret_provider: Optional :class:`SecretProvider` forwarded to each
+                account's :class:`KiroAuthManager` for cloud-native token
+                persistence. ``None`` preserves the local file-based behaviour.
+            coordinator: Optional :class:`TokenRefreshCoordinator` forwarded to
+                each account's :class:`KiroAuthManager` for single-flight token
+                refresh. ``None`` uses the in-process lock (single instance).
         """
         self._credentials_file = credentials_file
         self._state_file = state_file
+        # Shared runtime state backend (local file store by default).
+        self._state_store: StateStore = (
+            state_store if state_store is not None else LocalStateStore(state_file)
+        )
+        # Optional backend dependencies forwarded to per-account auth managers.
+        self._secret_provider = secret_provider
+        self._coordinator = coordinator
         self._accounts: Dict[str, Account] = {}
         self._model_to_accounts: Dict[str, ModelAccountList] = {}
         self._lock = asyncio.Lock()
@@ -327,93 +361,83 @@ class AccountManager:
     
     async def load_state(self) -> None:
         """
-        Load runtime state from state.json.
+        Load runtime state from the shared State_Store (``state.json`` for the
+        local backend).
         
-        Restores model_to_accounts mapping and account runtime state.
-        Creates empty state if file doesn't exist.
+        Restores model_to_accounts mapping and account runtime state into the
+        in-memory view. Creates empty state if nothing is persisted yet.
         """
-        state_path = Path(self._state_file)
-        
-        if not state_path.exists():
-            logger.debug("State file not found, starting with empty state")
-            return
-        
         try:
-            with open(state_path, 'r', encoding='utf-8') as f:
-                state_data = json.load(f)
-            # Restore global current_account_index
-            self._current_account_index = state_data.get("current_account_index", 0)
-            
-            # Restore model_to_accounts mapping (without next_index)
-            for model, data in state_data.get("model_to_accounts", {}).items():
-                self._model_to_accounts[model] = ModelAccountList(
-                    accounts=data.get("accounts", [])
+            # Local file store loads the on-disk snapshot into memory; other
+            # backends (e.g. DynamoDB) start empty and rebuild lazily.
+            if hasattr(self._state_store, "load"):
+                await self._state_store.load()
+
+            # Restore global current_account_index (sticky)
+            self._current_account_index = await self._state_store.get_sticky_index()
+
+            # Restore model_to_accounts mapping (bulk restore when supported)
+            if hasattr(self._state_store, "export_all"):
+                _, _store_accounts, store_models = self._state_store.export_all()
+                for model, accounts in store_models.items():
+                    self._model_to_accounts[model] = ModelAccountList(accounts=list(accounts))
+
+            # Restore account runtime state for known accounts
+            for account_id, account in self._accounts.items():
+                state = await self._state_store.get_account_state(account_id)
+                account.failures = state.failures
+                account.last_failure_time = state.last_failure_time
+                account.models_cached_at = state.models_cached_at
+                account.stats = AccountStats(
+                    total_requests=state.stats.total_requests,
+                    successful_requests=state.stats.successful_requests,
+                    failed_requests=state.stats.failed_requests,
                 )
-            
-            # Restore account runtime state
-            for account_id, data in state_data.get("accounts", {}).items():
-                if account_id in self._accounts:
-                    account = self._accounts[account_id]
-                    account.failures = data.get("failures", 0)
-                    account.last_failure_time = data.get("last_failure_time", 0.0)
-                    account.models_cached_at = data.get("models_cached_at", 0.0)
-                    
-                    stats_data = data.get("stats", {})
-                    account.stats = AccountStats(
-                        total_requests=stats_data.get("total_requests", 0),
-                        successful_requests=stats_data.get("successful_requests", 0),
-                        failed_requests=stats_data.get("failed_requests", 0)
-                    )
-            
+
             logger.info(f"Loaded state: {len(self._model_to_accounts)} model mappings, {len(self._accounts)} accounts")
-        
+
         except Exception as e:
             logger.error(f"Failed to load state: {e}")
     
+    def _account_state_snapshot(self) -> Dict[str, AccountState]:
+        """Project the in-memory accounts into storage-layer AccountState objects."""
+        return {
+            account_id: AccountState(
+                account_id=account_id,
+                failures=account.failures,
+                last_failure_time=account.last_failure_time,
+                models_cached_at=account.models_cached_at,
+                stats=AccountStatsState(
+                    total_requests=account.stats.total_requests,
+                    successful_requests=account.stats.successful_requests,
+                    failed_requests=account.stats.failed_requests,
+                ),
+            )
+            for account_id, account in self._accounts.items()
+        }
+
     async def _save_state(self) -> None:
         """
-        Save runtime state to state.json atomically.
+        Persist runtime state through the shared State_Store.
         
-        Uses tmp file + rename for atomic write.
+        For the local backend this performs the same atomic ``tmp + rename``
+        write of ``state.json`` as before. The authoritative in-memory view
+        (Account objects, model map, sticky index) is pushed into the store and
+        then flushed.
         """
-        state_data = {
-            "current_account_index": self._current_account_index,
-            "accounts": {
-                account_id: {
-                    "failures": account.failures,
-                    "last_failure_time": account.last_failure_time,
-                    "models_cached_at": account.models_cached_at,
-                    "stats": {
-                        "total_requests": account.stats.total_requests,
-                        "successful_requests": account.stats.successful_requests,
-                        "failed_requests": account.stats.failed_requests
-                    }
-                }
-                for account_id, account in self._accounts.items()
-            },
-            "model_to_accounts": {
-                model: {
-                    "accounts": mal.accounts
-                }
-                for model, mal in self._model_to_accounts.items()
-            }
-        }
-        
-        state_path = Path(self._state_file)
-        tmp_path = state_path.with_suffix('.json.tmp')
-        
         try:
-            with open(tmp_path, 'w', encoding='utf-8') as f:
-                json.dump(state_data, f, indent=2, ensure_ascii=False)
-            
-            # Atomic rename
-            tmp_path.replace(state_path)
-            logger.debug("State saved successfully")
-        
+            # Push the authoritative in-memory view into the store, preserving
+            # the historical state.json structure for the local backend.
+            if hasattr(self._state_store, "replace_all"):
+                await self._state_store.replace_all(
+                    self._current_account_index,
+                    self._account_state_snapshot(),
+                    {model: list(mal.accounts) for model, mal in self._model_to_accounts.items()},
+                )
+            if hasattr(self._state_store, "flush"):
+                await self._state_store.flush()
         except Exception as e:
             logger.error(f"Failed to save state: {e}")
-            if tmp_path.exists():
-                tmp_path.unlink()
     
     async def save_state_periodically(self) -> None:
         """
@@ -474,21 +498,30 @@ class AccountManager:
                     creds_file=account_id,
                     profile_arn=creds_config.get("profile_arn"),
                     region=creds_config.get("region", "us-east-1"),
-                    api_region=creds_config.get("api_region")
+                    api_region=creds_config.get("api_region"),
+                    secret_provider=self._secret_provider,
+                    coordinator=self._coordinator,
+                    account_id=account_id,
                 )
             elif cred_type == "sqlite":
                 auth_manager = KiroAuthManager(
                     sqlite_db=account_id,
                     profile_arn=creds_config.get("profile_arn"),
                     region=creds_config.get("region", "us-east-1"),
-                    api_region=creds_config.get("api_region")
+                    api_region=creds_config.get("api_region"),
+                    secret_provider=self._secret_provider,
+                    coordinator=self._coordinator,
+                    account_id=account_id,
                 )
             elif cred_type == "refresh_token":
                 auth_manager = KiroAuthManager(
                     refresh_token=creds_config.get("refresh_token"),
                     profile_arn=creds_config.get("profile_arn"),
                     region=creds_config.get("region", "us-east-1"),
-                    api_region=creds_config.get("api_region")
+                    api_region=creds_config.get("api_region"),
+                    secret_provider=self._secret_provider,
+                    coordinator=self._coordinator,
+                    account_id=account_id,
                 )
             else:
                 logger.error(f"Unknown credential type: {cred_type}")
@@ -569,6 +602,7 @@ class AccountManager:
                     self._model_to_accounts[model] = ModelAccountList()
                 if account_id not in self._model_to_accounts[model].accounts:
                     self._model_to_accounts[model].accounts.append(account_id)
+                    await self._state_store.add_model_account(model, account_id)
             
             logger.info(f"Initialized account: {account_id} ({len(available_models)} models)")
             self._dirty = True
@@ -631,6 +665,7 @@ class AccountManager:
                         self._model_to_accounts[model] = ModelAccountList()
                     if account_id not in self._model_to_accounts[model].accounts:
                         self._model_to_accounts[model].accounts.append(account_id)
+                        await self._state_store.add_model_account(model, account_id)
                 
                 logger.debug(f"Refreshed models for {account_id}")
                 self._dirty = True
@@ -740,6 +775,8 @@ class AccountManager:
                     if not success:
                         account.failures += 1
                         self._dirty = True
+                        # Mirror the failure increment into the shared State_Store.
+                        await self._state_store.increment_failure(account_id, account.last_failure_time)
                         continue
                 
                 # Check TTL and refresh if needed
@@ -775,15 +812,17 @@ class AccountManager:
             if not account:
                 return
             
-            # Reset failures
+            # Reset failures (atomic reset in the shared State_Store)
             if account.failures > 0:
                 account.failures = 0
                 self._dirty = True
+                await self._state_store.reset_failure(account_id)
             
-            # Update stats
+            # Update stats (atomic increment in the shared State_Store)
             account.stats.total_requests += 1
             account.stats.successful_requests += 1
             self._dirty = True
+            await self._state_store.incr_stats(account_id, total=1, ok=1, failed=0)
             
             # Dynamic learning: add model to mapping if successful
             # This allows system to learn about new models not in FALLBACK_MODELS
@@ -795,6 +834,7 @@ class AccountManager:
                 self._model_to_accounts[normalized_model].accounts.append(account_id)
                 logger.debug(f"Dynamic learning: model '{normalized_model}' works on account {account_id}")
                 self._dirty = True
+                await self._state_store.add_model_account(normalized_model, account_id)
             
             # GLOBAL STICKY: Update global current_account_index
             all_account_ids = list(self._accounts.keys())
@@ -803,6 +843,7 @@ class AccountManager:
                 if self._current_account_index != successful_index:
                     self._current_account_index = successful_index
                     self._dirty = True
+                    await self._state_store.set_sticky_index(successful_index)
             except ValueError:
                 pass
     
@@ -835,6 +876,7 @@ class AccountManager:
             if reason == "INVALID_MODEL_ID":
                 account.stats.total_requests += 1
                 self._dirty = True
+                await self._state_store.incr_stats(account_id, total=1, ok=0, failed=0)
                 logger.warning(
                     f"Model '{model}' not available on account {account_id}: "
                     f"status={status_code}, reason={reason}"
@@ -843,9 +885,12 @@ class AccountManager:
             
             # Update failure count (only for RECOVERABLE)
             if error_type == ErrorType.RECOVERABLE:
+                failure_time = time.time()
                 account.failures += 1
-                account.last_failure_time = time.time()
+                account.last_failure_time = failure_time
                 self._dirty = True
+                # Atomic failure counter increment in the shared State_Store
+                await self._state_store.increment_failure(account_id, failure_time)
                 
                 # Calculate backoff for logging
                 backoff_multiplier = min(2 ** (account.failures - 1), ACCOUNT_MAX_BACKOFF_MULTIPLIER)
@@ -860,6 +905,7 @@ class AccountManager:
             account.stats.total_requests += 1
             account.stats.failed_requests += 1
             self._dirty = True
+            await self._state_store.incr_stats(account_id, total=1, ok=0, failed=1)
             
             # GLOBAL STICKY: Do NOT change _current_account_index on failure
             # It only changes on success (GLOBAL sticky behavior)

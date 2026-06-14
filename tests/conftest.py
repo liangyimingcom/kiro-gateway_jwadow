@@ -36,6 +36,38 @@ def event_loop():
     loop.close()
 
 
+@pytest.fixture(autouse=True)
+def _ensure_current_event_loop():
+    """
+    Guarantee every test starts with a usable *current* event loop.
+
+    Several property-based tests drive coroutines with ``asyncio.run(...)``.
+    On Python 3.9 ``asyncio.run`` calls ``asyncio.set_event_loop(None)`` when it
+    returns, which leaves the event-loop policy with *no* current loop. A later
+    SYNCHRONOUS test that constructs an asyncio primitive outside a running loop
+    — e.g. ``asyncio.Lock()`` in ``ModelInfoCache.__init__`` or
+    ``asyncio.Event()`` in ``ShutdownState.__init__`` — would then crash with
+    ``RuntimeError: There is no current event loop``.
+
+    This autouse fixture restores proper isolation between tests by ensuring a
+    fresh, open event loop is installed as the current loop whenever the previous
+    test left none behind. It is purely a test-harness concern: it does not touch
+    production code, mocks, or any assertions, and it does not interfere with
+    ``pytest-asyncio`` (which installs and tears down its own loop for tests
+    marked ``@pytest.mark.asyncio``).
+    """
+    policy = asyncio.get_event_loop_policy()
+    try:
+        loop = policy.get_event_loop()
+        needs_fresh_loop = loop.is_closed()
+    except RuntimeError:
+        # No current event loop (e.g. a previous test ran asyncio.run()).
+        needs_fresh_loop = True
+    if needs_fresh_loop:
+        policy.set_event_loop(policy.new_event_loop())
+    yield
+
+
 # =============================================================================
 # Environment Fixtures
 # =============================================================================

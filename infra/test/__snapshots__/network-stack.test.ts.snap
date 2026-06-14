@@ -1,0 +1,994 @@
+// Jest Snapshot v1, https://goo.gl/fbAQLP
+
+exports[`NetworkStack 合成模板匹配快照（回归保护） 1`] = `
+{
+  "Parameters": {
+    "BootstrapVersion": {
+      "Default": "/cdk-bootstrap/hnb659fds/version",
+      "Description": "Version of the CDK Bootstrap resources in this environment, automatically retrieved from SSM Parameter Store. [cdk:skip]",
+      "Type": "AWS::SSM::Parameter::Value<String>",
+    },
+  },
+  "Resources": {
+    "CustomVpcRestrictDefaultSGCustomResourceProviderHandlerDC833E5E": {
+      "DependsOn": [
+        "CustomVpcRestrictDefaultSGCustomResourceProviderRole26592FE0",
+      ],
+      "Properties": {
+        "Code": {
+          "S3Bucket": "cdk-hnb659fds-assets-123456789012-us-east-1",
+          "S3Key": "02b51ab524e7bcf8f477de3e71e5f9a72e448301b26ba62e9e75a14f9c55a093.zip",
+        },
+        "Description": "Lambda function for removing all inbound/outbound rules from the VPC default security group",
+        "Handler": "__entrypoint__.handler",
+        "MemorySize": 128,
+        "Role": {
+          "Fn::GetAtt": [
+            "CustomVpcRestrictDefaultSGCustomResourceProviderRole26592FE0",
+            "Arn",
+          ],
+        },
+        "Runtime": "nodejs24.x",
+        "Timeout": 900,
+      },
+      "Type": "AWS::Lambda::Function",
+    },
+    "CustomVpcRestrictDefaultSGCustomResourceProviderRole26592FE0": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com",
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "ManagedPolicyArns": [
+          {
+            "Fn::Sub": "arn:\${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+          },
+        ],
+        "Policies": [
+          {
+            "PolicyDocument": {
+              "Statement": [
+                {
+                  "Action": [
+                    "ec2:AuthorizeSecurityGroupIngress",
+                    "ec2:AuthorizeSecurityGroupEgress",
+                    "ec2:RevokeSecurityGroupIngress",
+                    "ec2:RevokeSecurityGroupEgress",
+                  ],
+                  "Effect": "Allow",
+                  "Resource": [
+                    {
+                      "Fn::Join": [
+                        "",
+                        [
+                          "arn:",
+                          {
+                            "Ref": "AWS::Partition",
+                          },
+                          ":ec2:us-east-1:123456789012:security-group/",
+                          {
+                            "Fn::GetAtt": [
+                              "GatewayVpcFA33972A",
+                              "DefaultSecurityGroup",
+                            ],
+                          },
+                        ],
+                      ],
+                    },
+                  ],
+                },
+              ],
+              "Version": "2012-10-17",
+            },
+            "PolicyName": "Inline",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Role",
+    },
+    "GatewayVpcCloudWatchLogsEndpointBE2BE502": {
+      "Properties": {
+        "PrivateDnsEnabled": true,
+        "SecurityGroupIds": [
+          {
+            "Fn::GetAtt": [
+              "GatewayVpcCloudWatchLogsEndpointSecurityGroupCE3CC073",
+              "GroupId",
+            ],
+          },
+        ],
+        "ServiceName": "com.amazonaws.us-east-1.logs",
+        "SubnetIds": [
+          {
+            "Ref": "GatewayVpcprivateSubnet1SubnetC4CF5DA1",
+          },
+          {
+            "Ref": "GatewayVpcprivateSubnet2Subnet2DE5CB32",
+          },
+        ],
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": "test-gateway-network/GatewayVpc",
+          },
+        ],
+        "VpcEndpointType": "Interface",
+        "VpcId": {
+          "Ref": "GatewayVpcFA33972A",
+        },
+      },
+      "Type": "AWS::EC2::VPCEndpoint",
+    },
+    "GatewayVpcCloudWatchLogsEndpointSecurityGroupCE3CC073": {
+      "Properties": {
+        "GroupDescription": "test-gateway-network/GatewayVpc/CloudWatchLogsEndpoint/SecurityGroup",
+        "SecurityGroupEgress": [
+          {
+            "CidrIp": "0.0.0.0/0",
+            "Description": "Allow all outbound traffic by default",
+            "IpProtocol": "-1",
+          },
+        ],
+        "SecurityGroupIngress": [
+          {
+            "CidrIp": {
+              "Fn::GetAtt": [
+                "GatewayVpcFA33972A",
+                "CidrBlock",
+              ],
+            },
+            "Description": {
+              "Fn::Join": [
+                "",
+                [
+                  "from ",
+                  {
+                    "Fn::GetAtt": [
+                      "GatewayVpcFA33972A",
+                      "CidrBlock",
+                    ],
+                  },
+                  ":443",
+                ],
+              ],
+            },
+            "FromPort": 443,
+            "IpProtocol": "tcp",
+            "ToPort": 443,
+          },
+        ],
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": "test-gateway-network/GatewayVpc",
+          },
+        ],
+        "VpcId": {
+          "Ref": "GatewayVpcFA33972A",
+        },
+      },
+      "Type": "AWS::EC2::SecurityGroup",
+    },
+    "GatewayVpcDynamoDbGatewayEndpoint43CCEE62": {
+      "Properties": {
+        "RouteTableIds": [
+          {
+            "Ref": "GatewayVpcprivateSubnet1RouteTable702A46BA",
+          },
+          {
+            "Ref": "GatewayVpcprivateSubnet2RouteTable15F11A18",
+          },
+        ],
+        "ServiceName": {
+          "Fn::Join": [
+            "",
+            [
+              "com.amazonaws.",
+              {
+                "Ref": "AWS::Region",
+              },
+              ".dynamodb",
+            ],
+          ],
+        },
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": "test-gateway-network/GatewayVpc",
+          },
+        ],
+        "VpcEndpointType": "Gateway",
+        "VpcId": {
+          "Ref": "GatewayVpcFA33972A",
+        },
+      },
+      "Type": "AWS::EC2::VPCEndpoint",
+    },
+    "GatewayVpcEcrApiEndpoint1F3A446F": {
+      "Properties": {
+        "PrivateDnsEnabled": true,
+        "SecurityGroupIds": [
+          {
+            "Fn::GetAtt": [
+              "GatewayVpcEcrApiEndpointSecurityGroupFDED277A",
+              "GroupId",
+            ],
+          },
+        ],
+        "ServiceName": "com.amazonaws.us-east-1.ecr.api",
+        "SubnetIds": [
+          {
+            "Ref": "GatewayVpcprivateSubnet1SubnetC4CF5DA1",
+          },
+          {
+            "Ref": "GatewayVpcprivateSubnet2Subnet2DE5CB32",
+          },
+        ],
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": "test-gateway-network/GatewayVpc",
+          },
+        ],
+        "VpcEndpointType": "Interface",
+        "VpcId": {
+          "Ref": "GatewayVpcFA33972A",
+        },
+      },
+      "Type": "AWS::EC2::VPCEndpoint",
+    },
+    "GatewayVpcEcrApiEndpointSecurityGroupFDED277A": {
+      "Properties": {
+        "GroupDescription": "test-gateway-network/GatewayVpc/EcrApiEndpoint/SecurityGroup",
+        "SecurityGroupEgress": [
+          {
+            "CidrIp": "0.0.0.0/0",
+            "Description": "Allow all outbound traffic by default",
+            "IpProtocol": "-1",
+          },
+        ],
+        "SecurityGroupIngress": [
+          {
+            "CidrIp": {
+              "Fn::GetAtt": [
+                "GatewayVpcFA33972A",
+                "CidrBlock",
+              ],
+            },
+            "Description": {
+              "Fn::Join": [
+                "",
+                [
+                  "from ",
+                  {
+                    "Fn::GetAtt": [
+                      "GatewayVpcFA33972A",
+                      "CidrBlock",
+                    ],
+                  },
+                  ":443",
+                ],
+              ],
+            },
+            "FromPort": 443,
+            "IpProtocol": "tcp",
+            "ToPort": 443,
+          },
+        ],
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": "test-gateway-network/GatewayVpc",
+          },
+        ],
+        "VpcId": {
+          "Ref": "GatewayVpcFA33972A",
+        },
+      },
+      "Type": "AWS::EC2::SecurityGroup",
+    },
+    "GatewayVpcEcrDockerEndpointB69D9F5D": {
+      "Properties": {
+        "PrivateDnsEnabled": true,
+        "SecurityGroupIds": [
+          {
+            "Fn::GetAtt": [
+              "GatewayVpcEcrDockerEndpointSecurityGroup019DC6B1",
+              "GroupId",
+            ],
+          },
+        ],
+        "ServiceName": "com.amazonaws.us-east-1.ecr.dkr",
+        "SubnetIds": [
+          {
+            "Ref": "GatewayVpcprivateSubnet1SubnetC4CF5DA1",
+          },
+          {
+            "Ref": "GatewayVpcprivateSubnet2Subnet2DE5CB32",
+          },
+        ],
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": "test-gateway-network/GatewayVpc",
+          },
+        ],
+        "VpcEndpointType": "Interface",
+        "VpcId": {
+          "Ref": "GatewayVpcFA33972A",
+        },
+      },
+      "Type": "AWS::EC2::VPCEndpoint",
+    },
+    "GatewayVpcEcrDockerEndpointSecurityGroup019DC6B1": {
+      "Properties": {
+        "GroupDescription": "test-gateway-network/GatewayVpc/EcrDockerEndpoint/SecurityGroup",
+        "SecurityGroupEgress": [
+          {
+            "CidrIp": "0.0.0.0/0",
+            "Description": "Allow all outbound traffic by default",
+            "IpProtocol": "-1",
+          },
+        ],
+        "SecurityGroupIngress": [
+          {
+            "CidrIp": {
+              "Fn::GetAtt": [
+                "GatewayVpcFA33972A",
+                "CidrBlock",
+              ],
+            },
+            "Description": {
+              "Fn::Join": [
+                "",
+                [
+                  "from ",
+                  {
+                    "Fn::GetAtt": [
+                      "GatewayVpcFA33972A",
+                      "CidrBlock",
+                    ],
+                  },
+                  ":443",
+                ],
+              ],
+            },
+            "FromPort": 443,
+            "IpProtocol": "tcp",
+            "ToPort": 443,
+          },
+        ],
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": "test-gateway-network/GatewayVpc",
+          },
+        ],
+        "VpcId": {
+          "Ref": "GatewayVpcFA33972A",
+        },
+      },
+      "Type": "AWS::EC2::SecurityGroup",
+    },
+    "GatewayVpcFA33972A": {
+      "Properties": {
+        "CidrBlock": "10.0.0.0/16",
+        "EnableDnsHostnames": true,
+        "EnableDnsSupport": true,
+        "InstanceTenancy": "default",
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": "test-gateway-network/GatewayVpc",
+          },
+        ],
+      },
+      "Type": "AWS::EC2::VPC",
+    },
+    "GatewayVpcIGWE4D64C12": {
+      "Properties": {
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": "test-gateway-network/GatewayVpc",
+          },
+        ],
+      },
+      "Type": "AWS::EC2::InternetGateway",
+    },
+    "GatewayVpcRestrictDefaultSecurityGroupCustomResource4EE90B54": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "Account": "123456789012",
+        "DefaultSecurityGroupId": {
+          "Fn::GetAtt": [
+            "GatewayVpcFA33972A",
+            "DefaultSecurityGroup",
+          ],
+        },
+        "ServiceToken": {
+          "Fn::GetAtt": [
+            "CustomVpcRestrictDefaultSGCustomResourceProviderHandlerDC833E5E",
+            "Arn",
+          ],
+        },
+      },
+      "Type": "Custom::VpcRestrictDefaultSG",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "GatewayVpcS3GatewayEndpointB9A77265": {
+      "Properties": {
+        "RouteTableIds": [
+          {
+            "Ref": "GatewayVpcprivateSubnet1RouteTable702A46BA",
+          },
+          {
+            "Ref": "GatewayVpcprivateSubnet2RouteTable15F11A18",
+          },
+        ],
+        "ServiceName": {
+          "Fn::Join": [
+            "",
+            [
+              "com.amazonaws.",
+              {
+                "Ref": "AWS::Region",
+              },
+              ".s3",
+            ],
+          ],
+        },
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": "test-gateway-network/GatewayVpc",
+          },
+        ],
+        "VpcEndpointType": "Gateway",
+        "VpcId": {
+          "Ref": "GatewayVpcFA33972A",
+        },
+      },
+      "Type": "AWS::EC2::VPCEndpoint",
+    },
+    "GatewayVpcSecretsManagerEndpointA2FEA472": {
+      "Properties": {
+        "PrivateDnsEnabled": true,
+        "SecurityGroupIds": [
+          {
+            "Fn::GetAtt": [
+              "GatewayVpcSecretsManagerEndpointSecurityGroupD2AF5A55",
+              "GroupId",
+            ],
+          },
+        ],
+        "ServiceName": "com.amazonaws.us-east-1.secretsmanager",
+        "SubnetIds": [
+          {
+            "Ref": "GatewayVpcprivateSubnet1SubnetC4CF5DA1",
+          },
+          {
+            "Ref": "GatewayVpcprivateSubnet2Subnet2DE5CB32",
+          },
+        ],
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": "test-gateway-network/GatewayVpc",
+          },
+        ],
+        "VpcEndpointType": "Interface",
+        "VpcId": {
+          "Ref": "GatewayVpcFA33972A",
+        },
+      },
+      "Type": "AWS::EC2::VPCEndpoint",
+    },
+    "GatewayVpcSecretsManagerEndpointSecurityGroupD2AF5A55": {
+      "Properties": {
+        "GroupDescription": "test-gateway-network/GatewayVpc/SecretsManagerEndpoint/SecurityGroup",
+        "SecurityGroupEgress": [
+          {
+            "CidrIp": "0.0.0.0/0",
+            "Description": "Allow all outbound traffic by default",
+            "IpProtocol": "-1",
+          },
+        ],
+        "SecurityGroupIngress": [
+          {
+            "CidrIp": {
+              "Fn::GetAtt": [
+                "GatewayVpcFA33972A",
+                "CidrBlock",
+              ],
+            },
+            "Description": {
+              "Fn::Join": [
+                "",
+                [
+                  "from ",
+                  {
+                    "Fn::GetAtt": [
+                      "GatewayVpcFA33972A",
+                      "CidrBlock",
+                    ],
+                  },
+                  ":443",
+                ],
+              ],
+            },
+            "FromPort": 443,
+            "IpProtocol": "tcp",
+            "ToPort": 443,
+          },
+        ],
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": "test-gateway-network/GatewayVpc",
+          },
+        ],
+        "VpcId": {
+          "Ref": "GatewayVpcFA33972A",
+        },
+      },
+      "Type": "AWS::EC2::SecurityGroup",
+    },
+    "GatewayVpcSsmEndpointD49BE82D": {
+      "Properties": {
+        "PrivateDnsEnabled": true,
+        "SecurityGroupIds": [
+          {
+            "Fn::GetAtt": [
+              "GatewayVpcSsmEndpointSecurityGroup1DED8A37",
+              "GroupId",
+            ],
+          },
+        ],
+        "ServiceName": "com.amazonaws.us-east-1.ssm",
+        "SubnetIds": [
+          {
+            "Ref": "GatewayVpcprivateSubnet1SubnetC4CF5DA1",
+          },
+          {
+            "Ref": "GatewayVpcprivateSubnet2Subnet2DE5CB32",
+          },
+        ],
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": "test-gateway-network/GatewayVpc",
+          },
+        ],
+        "VpcEndpointType": "Interface",
+        "VpcId": {
+          "Ref": "GatewayVpcFA33972A",
+        },
+      },
+      "Type": "AWS::EC2::VPCEndpoint",
+    },
+    "GatewayVpcSsmEndpointSecurityGroup1DED8A37": {
+      "Properties": {
+        "GroupDescription": "test-gateway-network/GatewayVpc/SsmEndpoint/SecurityGroup",
+        "SecurityGroupEgress": [
+          {
+            "CidrIp": "0.0.0.0/0",
+            "Description": "Allow all outbound traffic by default",
+            "IpProtocol": "-1",
+          },
+        ],
+        "SecurityGroupIngress": [
+          {
+            "CidrIp": {
+              "Fn::GetAtt": [
+                "GatewayVpcFA33972A",
+                "CidrBlock",
+              ],
+            },
+            "Description": {
+              "Fn::Join": [
+                "",
+                [
+                  "from ",
+                  {
+                    "Fn::GetAtt": [
+                      "GatewayVpcFA33972A",
+                      "CidrBlock",
+                    ],
+                  },
+                  ":443",
+                ],
+              ],
+            },
+            "FromPort": 443,
+            "IpProtocol": "tcp",
+            "ToPort": 443,
+          },
+        ],
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": "test-gateway-network/GatewayVpc",
+          },
+        ],
+        "VpcId": {
+          "Ref": "GatewayVpcFA33972A",
+        },
+      },
+      "Type": "AWS::EC2::SecurityGroup",
+    },
+    "GatewayVpcVPCGW4AE7E466": {
+      "Properties": {
+        "InternetGatewayId": {
+          "Ref": "GatewayVpcIGWE4D64C12",
+        },
+        "VpcId": {
+          "Ref": "GatewayVpcFA33972A",
+        },
+      },
+      "Type": "AWS::EC2::VPCGatewayAttachment",
+    },
+    "GatewayVpcprivateSubnet1DefaultRoute8AC9A276": {
+      "Properties": {
+        "DestinationCidrBlock": "0.0.0.0/0",
+        "NatGatewayId": {
+          "Ref": "GatewayVpcpublicSubnet1NATGatewayD0F1CC75",
+        },
+        "RouteTableId": {
+          "Ref": "GatewayVpcprivateSubnet1RouteTable702A46BA",
+        },
+      },
+      "Type": "AWS::EC2::Route",
+    },
+    "GatewayVpcprivateSubnet1RouteTable702A46BA": {
+      "Properties": {
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": "test-gateway-network/GatewayVpc/privateSubnet1",
+          },
+        ],
+        "VpcId": {
+          "Ref": "GatewayVpcFA33972A",
+        },
+      },
+      "Type": "AWS::EC2::RouteTable",
+    },
+    "GatewayVpcprivateSubnet1RouteTableAssociationDAA82ED6": {
+      "Properties": {
+        "RouteTableId": {
+          "Ref": "GatewayVpcprivateSubnet1RouteTable702A46BA",
+        },
+        "SubnetId": {
+          "Ref": "GatewayVpcprivateSubnet1SubnetC4CF5DA1",
+        },
+      },
+      "Type": "AWS::EC2::SubnetRouteTableAssociation",
+    },
+    "GatewayVpcprivateSubnet1SubnetC4CF5DA1": {
+      "Properties": {
+        "AvailabilityZone": "dummy1a",
+        "CidrBlock": "10.0.2.0/24",
+        "MapPublicIpOnLaunch": false,
+        "Tags": [
+          {
+            "Key": "aws-cdk:subnet-name",
+            "Value": "private",
+          },
+          {
+            "Key": "aws-cdk:subnet-type",
+            "Value": "Private",
+          },
+          {
+            "Key": "Name",
+            "Value": "test-gateway-network/GatewayVpc/privateSubnet1",
+          },
+        ],
+        "VpcId": {
+          "Ref": "GatewayVpcFA33972A",
+        },
+      },
+      "Type": "AWS::EC2::Subnet",
+    },
+    "GatewayVpcprivateSubnet2DefaultRouteDAD92140": {
+      "Properties": {
+        "DestinationCidrBlock": "0.0.0.0/0",
+        "NatGatewayId": {
+          "Ref": "GatewayVpcpublicSubnet2NATGatewayDFDE2BAF",
+        },
+        "RouteTableId": {
+          "Ref": "GatewayVpcprivateSubnet2RouteTable15F11A18",
+        },
+      },
+      "Type": "AWS::EC2::Route",
+    },
+    "GatewayVpcprivateSubnet2RouteTable15F11A18": {
+      "Properties": {
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": "test-gateway-network/GatewayVpc/privateSubnet2",
+          },
+        ],
+        "VpcId": {
+          "Ref": "GatewayVpcFA33972A",
+        },
+      },
+      "Type": "AWS::EC2::RouteTable",
+    },
+    "GatewayVpcprivateSubnet2RouteTableAssociation52D3ADB0": {
+      "Properties": {
+        "RouteTableId": {
+          "Ref": "GatewayVpcprivateSubnet2RouteTable15F11A18",
+        },
+        "SubnetId": {
+          "Ref": "GatewayVpcprivateSubnet2Subnet2DE5CB32",
+        },
+      },
+      "Type": "AWS::EC2::SubnetRouteTableAssociation",
+    },
+    "GatewayVpcprivateSubnet2Subnet2DE5CB32": {
+      "Properties": {
+        "AvailabilityZone": "dummy1b",
+        "CidrBlock": "10.0.3.0/24",
+        "MapPublicIpOnLaunch": false,
+        "Tags": [
+          {
+            "Key": "aws-cdk:subnet-name",
+            "Value": "private",
+          },
+          {
+            "Key": "aws-cdk:subnet-type",
+            "Value": "Private",
+          },
+          {
+            "Key": "Name",
+            "Value": "test-gateway-network/GatewayVpc/privateSubnet2",
+          },
+        ],
+        "VpcId": {
+          "Ref": "GatewayVpcFA33972A",
+        },
+      },
+      "Type": "AWS::EC2::Subnet",
+    },
+    "GatewayVpcpublicSubnet1DefaultRouteB989F492": {
+      "DependsOn": [
+        "GatewayVpcVPCGW4AE7E466",
+      ],
+      "Properties": {
+        "DestinationCidrBlock": "0.0.0.0/0",
+        "GatewayId": {
+          "Ref": "GatewayVpcIGWE4D64C12",
+        },
+        "RouteTableId": {
+          "Ref": "GatewayVpcpublicSubnet1RouteTable8C97E2A0",
+        },
+      },
+      "Type": "AWS::EC2::Route",
+    },
+    "GatewayVpcpublicSubnet1EIP56558192": {
+      "Properties": {
+        "Domain": "vpc",
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": "test-gateway-network/GatewayVpc/publicSubnet1",
+          },
+        ],
+      },
+      "Type": "AWS::EC2::EIP",
+    },
+    "GatewayVpcpublicSubnet1NATGatewayD0F1CC75": {
+      "DependsOn": [
+        "GatewayVpcpublicSubnet1DefaultRouteB989F492",
+        "GatewayVpcpublicSubnet1RouteTableAssociation1BE71BF0",
+      ],
+      "Properties": {
+        "AllocationId": {
+          "Fn::GetAtt": [
+            "GatewayVpcpublicSubnet1EIP56558192",
+            "AllocationId",
+          ],
+        },
+        "SubnetId": {
+          "Ref": "GatewayVpcpublicSubnet1SubnetEF9C1F5B",
+        },
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": "test-gateway-network/GatewayVpc/publicSubnet1",
+          },
+        ],
+      },
+      "Type": "AWS::EC2::NatGateway",
+    },
+    "GatewayVpcpublicSubnet1RouteTable8C97E2A0": {
+      "Properties": {
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": "test-gateway-network/GatewayVpc/publicSubnet1",
+          },
+        ],
+        "VpcId": {
+          "Ref": "GatewayVpcFA33972A",
+        },
+      },
+      "Type": "AWS::EC2::RouteTable",
+    },
+    "GatewayVpcpublicSubnet1RouteTableAssociation1BE71BF0": {
+      "Properties": {
+        "RouteTableId": {
+          "Ref": "GatewayVpcpublicSubnet1RouteTable8C97E2A0",
+        },
+        "SubnetId": {
+          "Ref": "GatewayVpcpublicSubnet1SubnetEF9C1F5B",
+        },
+      },
+      "Type": "AWS::EC2::SubnetRouteTableAssociation",
+    },
+    "GatewayVpcpublicSubnet1SubnetEF9C1F5B": {
+      "Properties": {
+        "AvailabilityZone": "dummy1a",
+        "CidrBlock": "10.0.0.0/24",
+        "MapPublicIpOnLaunch": true,
+        "Tags": [
+          {
+            "Key": "aws-cdk:subnet-name",
+            "Value": "public",
+          },
+          {
+            "Key": "aws-cdk:subnet-type",
+            "Value": "Public",
+          },
+          {
+            "Key": "Name",
+            "Value": "test-gateway-network/GatewayVpc/publicSubnet1",
+          },
+        ],
+        "VpcId": {
+          "Ref": "GatewayVpcFA33972A",
+        },
+      },
+      "Type": "AWS::EC2::Subnet",
+    },
+    "GatewayVpcpublicSubnet2DefaultRoute1C18477E": {
+      "DependsOn": [
+        "GatewayVpcVPCGW4AE7E466",
+      ],
+      "Properties": {
+        "DestinationCidrBlock": "0.0.0.0/0",
+        "GatewayId": {
+          "Ref": "GatewayVpcIGWE4D64C12",
+        },
+        "RouteTableId": {
+          "Ref": "GatewayVpcpublicSubnet2RouteTableB516F815",
+        },
+      },
+      "Type": "AWS::EC2::Route",
+    },
+    "GatewayVpcpublicSubnet2EIP063D3E90": {
+      "Properties": {
+        "Domain": "vpc",
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": "test-gateway-network/GatewayVpc/publicSubnet2",
+          },
+        ],
+      },
+      "Type": "AWS::EC2::EIP",
+    },
+    "GatewayVpcpublicSubnet2NATGatewayDFDE2BAF": {
+      "DependsOn": [
+        "GatewayVpcpublicSubnet2DefaultRoute1C18477E",
+        "GatewayVpcpublicSubnet2RouteTableAssociationB8EC42A0",
+      ],
+      "Properties": {
+        "AllocationId": {
+          "Fn::GetAtt": [
+            "GatewayVpcpublicSubnet2EIP063D3E90",
+            "AllocationId",
+          ],
+        },
+        "SubnetId": {
+          "Ref": "GatewayVpcpublicSubnet2Subnet39EADCAA",
+        },
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": "test-gateway-network/GatewayVpc/publicSubnet2",
+          },
+        ],
+      },
+      "Type": "AWS::EC2::NatGateway",
+    },
+    "GatewayVpcpublicSubnet2RouteTableAssociationB8EC42A0": {
+      "Properties": {
+        "RouteTableId": {
+          "Ref": "GatewayVpcpublicSubnet2RouteTableB516F815",
+        },
+        "SubnetId": {
+          "Ref": "GatewayVpcpublicSubnet2Subnet39EADCAA",
+        },
+      },
+      "Type": "AWS::EC2::SubnetRouteTableAssociation",
+    },
+    "GatewayVpcpublicSubnet2RouteTableB516F815": {
+      "Properties": {
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": "test-gateway-network/GatewayVpc/publicSubnet2",
+          },
+        ],
+        "VpcId": {
+          "Ref": "GatewayVpcFA33972A",
+        },
+      },
+      "Type": "AWS::EC2::RouteTable",
+    },
+    "GatewayVpcpublicSubnet2Subnet39EADCAA": {
+      "Properties": {
+        "AvailabilityZone": "dummy1b",
+        "CidrBlock": "10.0.1.0/24",
+        "MapPublicIpOnLaunch": true,
+        "Tags": [
+          {
+            "Key": "aws-cdk:subnet-name",
+            "Value": "public",
+          },
+          {
+            "Key": "aws-cdk:subnet-type",
+            "Value": "Public",
+          },
+          {
+            "Key": "Name",
+            "Value": "test-gateway-network/GatewayVpc/publicSubnet2",
+          },
+        ],
+        "VpcId": {
+          "Ref": "GatewayVpcFA33972A",
+        },
+      },
+      "Type": "AWS::EC2::Subnet",
+    },
+  },
+  "Rules": {
+    "CheckBootstrapVersion": {
+      "Assertions": [
+        {
+          "Assert": {
+            "Fn::Not": [
+              {
+                "Fn::Contains": [
+                  [
+                    "1",
+                    "2",
+                    "3",
+                    "4",
+                    "5",
+                  ],
+                  {
+                    "Ref": "BootstrapVersion",
+                  },
+                ],
+              },
+            ],
+          },
+          "AssertDescription": "CDK bootstrap stack version 6 required. Please run 'cdk bootstrap' with a recent version of the CDK CLI.",
+        },
+      ],
+    },
+  },
+}
+`;

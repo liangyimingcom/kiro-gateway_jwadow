@@ -22,6 +22,21 @@ Kiro Gateway Configuration.
 
 Centralized storage for all settings, constants, and mappings.
 Loads environment variables and provides typed access to them.
+
+Storage backend abstraction (AWS cloud-native refactor)
+-------------------------------------------------------
+Configuration values are no longer read directly via ``os.getenv``. Instead they
+are sourced through an injected :class:`~kiro.backends.interfaces.ConfigProvider`
+(see design.md "组件与接口"). By default a process-environment provider is used,
+which is *behaviourally identical* to the previous ``os.getenv`` based loading
+(precedence: environment variable > code default). At start-up the application
+injects the provider produced by :func:`kiro.backends.factory.create_backend`
+via :func:`set_config_provider`, which re-evaluates the module level constants
+so that an alternative backend (e.g. SSM Parameter Store) can take effect.
+
+All public constant names, default values and the model alias / hidden model
+logic are preserved exactly, so existing call sites (``from kiro.config import
+X``) keep working unchanged.
 """
 
 import os
@@ -76,94 +91,72 @@ def _get_raw_env_value(var_name: str, env_file: str = ".env") -> Optional[str]:
     
     return None
 
+
 # ==================================================================================================
-# Server Settings
+# Configuration Provider (Storage Backend Abstraction)
 # ==================================================================================================
 
-# Server host (default: 0.0.0.0 - listen on all interfaces)
+
+class _EnvConfigProvider:
+    """
+    Default :class:`~kiro.backends.interfaces.ConfigProvider` implementation that
+    reads from the process environment.
+
+    This is deliberately defined inline (rather than importing
+    ``kiro.backends.local.LocalConfigProvider``) to avoid an import cycle
+    (``kiro.config`` <-> ``kiro.backends.local.config_provider``). It is
+    behaviourally equivalent to the previous direct ``os.getenv`` usage:
+    precedence is environment variable > provided default.
+    """
+
+    def get(self, key: str, default: Optional[str] = None) -> Optional[str]:
+        value = os.getenv(key)
+        if value is None:
+            return default
+        return value
+
+    def get_required(self, key: str) -> str:
+        value = os.getenv(key)
+        if value is None:
+            # Imported lazily to avoid an import cycle at module load time.
+            from kiro.backends.interfaces import MissingConfigError
+
+            raise MissingConfigError(key)
+        return value
+
+    def get_namespace(self, prefix: str) -> Dict[str, str]:
+        return {k: v for k, v in os.environ.items() if k.startswith(prefix)}
+
+    def reload(self) -> None:
+        load_dotenv()
+
+
+# The active configuration provider. Defaults to the process-environment
+# provider; replaced at start-up via set_config_provider() with the provider
+# from the selected storage backend (local | aws).
+_config_provider = _EnvConfigProvider()
+
+
+def get_config_provider():
+    """Return the active :class:`ConfigProvider`."""
+    return _config_provider
+
+
+def _cfg(key: str, default: Optional[str] = None) -> Optional[str]:
+    """Read ``key`` from the active configuration provider (env > default)."""
+    return _config_provider.get(key, default)
+
+
+# ==================================================================================================
+# Non-configurable constants (not sourced from the environment)
+# ==================================================================================================
+
+# Server host default (default: 0.0.0.0 - listen on all interfaces)
 # Use "127.0.0.1" to only allow local connections
 DEFAULT_SERVER_HOST: str = "0.0.0.0"
-SERVER_HOST: str = os.getenv("SERVER_HOST", DEFAULT_SERVER_HOST)
 
-# Server port (default: 8000)
-# Can be overridden by CLI: python main.py --port 9000
-# Or by uvicorn directly: uvicorn main:app --port 9000
+# Server port default (default: 8000)
 DEFAULT_SERVER_PORT: int = 8000
-SERVER_PORT: int = int(os.getenv("SERVER_PORT", str(DEFAULT_SERVER_PORT)))
-
-# ==================================================================================================
-# Proxy Server Settings
-# ==================================================================================================
-
-# API key for proxy access (clients must pass it in Authorization header)
-PROXY_API_KEY: str = os.getenv("PROXY_API_KEY", "my-super-secret-password-123")
-
-# ==================================================================================================
-# VPN/Proxy Settings for Kiro API Access
-# ==================================================================================================
-
-# VPN/Proxy URL for accessing Kiro API through a proxy server.
-# Leave empty to connect directly (default).
-#
-# Use cases:
-#   - China: GFW (Great Firewall) blocks AWS endpoints
-#   - Corporate networks: Often require mandatory proxy
-#   - Privacy: Hide your IP address from AWS
-#
-# Supports HTTP and SOCKS5 protocols.
-# Authentication can be embedded in the URL.
-#
-# Examples:
-#   VPN_PROXY_URL=http://127.0.0.1:7890
-#   VPN_PROXY_URL=socks5://127.0.0.1:1080
-#   VPN_PROXY_URL=http://user:password@proxy.company.com:8080
-#   VPN_PROXY_URL=192.168.1.100:8080  (defaults to http://)
-VPN_PROXY_URL: str = os.getenv("VPN_PROXY_URL", "")
-
-# ==================================================================================================
-# Kiro API Credentials
-# ==================================================================================================
-
-# Refresh token for updating access token
-REFRESH_TOKEN: str = os.getenv("REFRESH_TOKEN", "")
-
-# Profile ARN for AWS CodeWhisperer
-PROFILE_ARN: str = os.getenv("PROFILE_ARN", "")
-
-# AWS SSO/auth region (default us-east-1)
-# This region is used for OIDC token refresh endpoint: https://oidc.{region}.amazonaws.com/token
-#
-# IMPORTANT: SSO region may differ from Q API region!
-# - SSO region: Where your AWS SSO/IAM Identity Center is configured
-# - API region: Where Q Developer API endpoints are available (q.{region}.amazonaws.com)
-#
-# The gateway automatically detects the correct API region from your credentials:
-# - SQLite (kiro-cli): Extracts from profile ARN in state table
-# - JSON (Kiro IDE): Uses region field from credentials file
-# - Environment variables: Falls back to this SSO region
-#
-# For manual override of API region, use KIRO_API_REGION environment variable.
-# See: https://github.com/jwadow/kiro-gateway/issues/132
-REGION: str = os.getenv("KIRO_REGION", "us-east-1")
-
-# Path to credentials file (optional, alternative to .env)
-# Read directly from .env to avoid escape sequence issues on Windows
-# (e.g., \a in path D:\Projects\adolf is interpreted as bell character)
-_raw_creds_file = _get_raw_env_value("KIRO_CREDS_FILE") or os.getenv("KIRO_CREDS_FILE", "")
-# Normalize path for cross-platform compatibility
-KIRO_CREDS_FILE: str = str(Path(_raw_creds_file)) if _raw_creds_file else ""
-
-# Path to kiro-cli SQLite database (optional, for AWS SSO OIDC authentication)
-# Default location: ~/.local/share/kiro-cli/data.sqlite3 (Linux/macOS)
-# or ~/.local/share/amazon-q/data.sqlite3 (amazon-q-developer-cli)
-_raw_cli_db_file = _get_raw_env_value("KIRO_CLI_DB_FILE") or os.getenv("KIRO_CLI_DB_FILE", "")
-KIRO_CLI_DB_FILE: str = str(Path(_raw_cli_db_file)) if _raw_cli_db_file else ""
-
-# Disable SQLite write-back (read-only mode)
-# When enabled, gateway will only read from kiro-cli database without modifying it.
-# Useful when kiro-cli is actively managing tokens and you don't want gateway to interfere.
-# Default: false (write-back enabled)
-SQLITE_READONLY: bool = os.getenv("SQLITE_READONLY", "false").lower() in ("true", "1", "yes")
 
 # ==================================================================================================
 # Kiro API URL Templates
@@ -300,88 +293,289 @@ MODEL_CACHE_TTL: int = 3600
 DEFAULT_MAX_INPUT_TOKENS: int = 200000
 
 # ==================================================================================================
-# Tool Description Handling (Kiro API Limitations)
+# Fake Reasoning - static tag configuration (not sourced from the environment)
 # ==================================================================================================
 
-# Kiro API returns 400 "Improperly formed request" error when tool descriptions
-# in toolSpecification.description are too long.
-#
-# Solution: Tool Documentation Reference Pattern
-# - If description ≤ limit → keep as is
-# - If description > limit:
-#   * In toolSpecification.description → reference to system prompt:
-#     "[Full documentation in system prompt under '## Tool: {name}']"
-#   * In system prompt, a section "## Tool: {name}" with full description is added
-#
-# The model sees an explicit reference and knows exactly where to find full documentation.
-
-# Maximum length of tool description in characters.
-# Descriptions longer than this limit will be moved to system prompt.
-# Set to 0 to disable (not recommended - will cause Kiro API errors).
-TOOL_DESCRIPTION_MAX_LENGTH: int = int(os.getenv("TOOL_DESCRIPTION_MAX_LENGTH", "10000"))
+# List of opening tags to detect thinking blocks.
+# The parser will look for any of these tags at the start of the response.
+# Order matters - first match wins.
+FAKE_REASONING_OPEN_TAGS: List[str] = ["<thinking>", "<think>", "<reasoning>", "<thought>"]
 
 # ==================================================================================================
-# Truncation Recovery Settings
+# Application Version
 # ==================================================================================================
 
-# Enable automatic truncation recovery (synthetic message injection)
-# When enabled, gateway will inject synthetic messages ONLY when truncation is detected:
-# - For tool calls: synthetic tool_result with error message
-# - For content: synthetic user message notifying about truncation
-# This helps the model understand and adapt to Kiro API limitations
-# Default: true (enabled)
-TRUNCATION_RECOVERY: bool = os.getenv("TRUNCATION_RECOVERY", "true").lower() in ("true", "1", "yes")
+APP_VERSION: str = "2.4.dev.13"
+APP_TITLE: str = "Kiro Gateway"
+APP_DESCRIPTION: str = "Proxy gateway for Kiro API (Amazon Q Developer / AWS CodeWhisperer). OpenAI and Anthropic compatible. Made by @jwadow"
 
-# ==================================================================================================
-# Logging Settings
-# ==================================================================================================
 
-# Log level for the application
-# Available levels: TRACE, DEBUG, INFO, WARNING, ERROR, CRITICAL
-# Default: INFO (recommended for production)
-# Set to DEBUG for detailed troubleshooting
-LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()
+def _load_config() -> None:
+    """
+    (Re)evaluate all environment-sourced configuration constants from the active
+    :class:`ConfigProvider`.
 
-# ==================================================================================================
-# First Token Timeout Settings (Streaming Retry)
-# ==================================================================================================
+    Called once at import time with the default process-environment provider and
+    again whenever a different provider is injected via
+    :func:`set_config_provider` (so an alternative backend can take effect). All
+    constant names and default values are preserved exactly.
+    """
+    global SERVER_HOST, SERVER_PORT, PROXY_API_KEY, VPN_PROXY_URL
+    global REFRESH_TOKEN, PROFILE_ARN, REGION, KIRO_CREDS_FILE, KIRO_CLI_DB_FILE
+    global SQLITE_READONLY, TOOL_DESCRIPTION_MAX_LENGTH, TRUNCATION_RECOVERY
+    global LOG_LEVEL, LOG_FORMAT, FIRST_TOKEN_TIMEOUT, STREAMING_READ_TIMEOUT, FIRST_TOKEN_MAX_RETRIES
+    global DEBUG_MODE, DEBUG_DIR
+    global FAKE_REASONING_ENABLED, FAKE_REASONING_MAX_TOKENS, FAKE_REASONING_BUDGET_CAP
+    global FAKE_REASONING_HANDLING, FAKE_REASONING_INITIAL_BUFFER_SIZE
+    global KIRO_MAX_PAYLOAD_BYTES, AUTO_TRIM_PAYLOAD, WEB_SEARCH_ENABLED
+    global ACCOUNT_SYSTEM, ACCOUNTS_CONFIG_FILE, ACCOUNTS_STATE_FILE
+    global ACCOUNT_RECOVERY_TIMEOUT, ACCOUNT_MAX_BACKOFF_MULTIPLIER
+    global ACCOUNT_PROBABILISTIC_RETRY_CHANCE, ACCOUNT_CACHE_TTL, STATE_SAVE_INTERVAL_SECONDS
 
-# Timeout for waiting for the first token from the model (in seconds).
-# If the model doesn't respond within this time, the request will be cancelled and retried.
-# This helps handle "stuck" requests when the model takes too long to think.
-# Default: 30 seconds (recommended for production)
-# Set a lower value (e.g., 10-15) for more aggressive retry.
-FIRST_TOKEN_TIMEOUT: float = float(os.getenv("FIRST_TOKEN_TIMEOUT", "15"))
+    # ==============================================================================================
+    # Server Settings
+    # ==============================================================================================
 
-# Read timeout for streaming responses (in seconds).
-# This is the maximum time to wait for data between chunks during streaming.
-# Should be longer than FIRST_TOKEN_TIMEOUT since the model may pause between chunks
-# while "thinking" (especially for tool calls or complex reasoning).
-# Default: 300 seconds (5 minutes) - generous timeout to avoid premature disconnects.
-STREAMING_READ_TIMEOUT: float = float(os.getenv("STREAMING_READ_TIMEOUT", "300"))
+    # Server host (default: 0.0.0.0 - listen on all interfaces)
+    # Use "127.0.0.1" to only allow local connections
+    SERVER_HOST = _cfg("SERVER_HOST", DEFAULT_SERVER_HOST)
 
-# Maximum number of attempts on first token timeout.
-# After exhausting all attempts, an error will be returned.
-# Default: 3 attempts
-FIRST_TOKEN_MAX_RETRIES: int = int(os.getenv("FIRST_TOKEN_MAX_RETRIES", "3"))
+    # Server port (default: 8000)
+    # Can be overridden by CLI: python main.py --port 9000
+    # Or by uvicorn directly: uvicorn main:app --port 9000
+    SERVER_PORT = int(_cfg("SERVER_PORT", str(DEFAULT_SERVER_PORT)))
 
-# ==================================================================================================
-# Debug Settings
-# ==================================================================================================
+    # ==============================================================================================
+    # Proxy Server Settings
+    # ==============================================================================================
 
-# Debug logging mode:
-# - off: disabled (default)
-# - errors: save logs only for failed requests (4xx, 5xx)
-# - all: save logs for every request (overwrites on each request)
-_DEBUG_MODE_RAW: str = os.getenv("DEBUG_MODE", "").lower()
+    # API key for proxy access (clients must pass it in Authorization header)
+    PROXY_API_KEY = _cfg("PROXY_API_KEY", "my-super-secret-password-123")
 
-if _DEBUG_MODE_RAW in ("off", "errors", "all"):
-    DEBUG_MODE: str = _DEBUG_MODE_RAW
-else:
-    DEBUG_MODE: str = "off"
+    # ==============================================================================================
+    # VPN/Proxy Settings for Kiro API Access
+    # ==============================================================================================
 
-# Directory for debug log files
-DEBUG_DIR: str = os.getenv("DEBUG_DIR", "debug_logs")
+    # VPN/Proxy URL for accessing Kiro API through a proxy server.
+    # Leave empty to connect directly (default). Supports HTTP and SOCKS5.
+    VPN_PROXY_URL = _cfg("VPN_PROXY_URL", "")
+
+    # ==============================================================================================
+    # Kiro API Credentials
+    # ==============================================================================================
+
+    # Refresh token for updating access token
+    REFRESH_TOKEN = _cfg("REFRESH_TOKEN", "")
+
+    # Profile ARN for AWS CodeWhisperer
+    PROFILE_ARN = _cfg("PROFILE_ARN", "")
+
+    # AWS SSO/auth region (default us-east-1)
+    # This region is used for OIDC token refresh endpoint: https://oidc.{region}.amazonaws.com/token
+    REGION = _cfg("KIRO_REGION", "us-east-1")
+
+    # Path to credentials file (optional, alternative to .env)
+    # Read directly from .env to avoid escape sequence issues on Windows
+    # (e.g., \a in path D:\Projects\adolf is interpreted as bell character)
+    _raw_creds_file = _get_raw_env_value("KIRO_CREDS_FILE") or _cfg("KIRO_CREDS_FILE", "")
+    # Normalize path for cross-platform compatibility
+    KIRO_CREDS_FILE = str(Path(_raw_creds_file)) if _raw_creds_file else ""
+
+    # Path to kiro-cli SQLite database (optional, for AWS SSO OIDC authentication)
+    _raw_cli_db_file = _get_raw_env_value("KIRO_CLI_DB_FILE") or _cfg("KIRO_CLI_DB_FILE", "")
+    KIRO_CLI_DB_FILE = str(Path(_raw_cli_db_file)) if _raw_cli_db_file else ""
+
+    # Disable SQLite write-back (read-only mode)
+    # Default: false (write-back enabled)
+    SQLITE_READONLY = _cfg("SQLITE_READONLY", "false").lower() in ("true", "1", "yes")
+
+    # ==============================================================================================
+    # Tool Description Handling (Kiro API Limitations)
+    # ==============================================================================================
+
+    # Maximum length of tool description in characters.
+    # Descriptions longer than this limit will be moved to system prompt.
+    # Set to 0 to disable (not recommended - will cause Kiro API errors).
+    TOOL_DESCRIPTION_MAX_LENGTH = int(_cfg("TOOL_DESCRIPTION_MAX_LENGTH", "10000"))
+
+    # ==============================================================================================
+    # Truncation Recovery Settings
+    # ==============================================================================================
+
+    # Enable automatic truncation recovery (synthetic message injection)
+    # Default: true (enabled)
+    TRUNCATION_RECOVERY = _cfg("TRUNCATION_RECOVERY", "true").lower() in ("true", "1", "yes")
+
+    # ==============================================================================================
+    # Logging Settings
+    # ==============================================================================================
+
+    # Log level for the application
+    # Available levels: TRACE, DEBUG, INFO, WARNING, ERROR, CRITICAL
+    # Default: INFO (recommended for production)
+    LOG_LEVEL = _cfg("LOG_LEVEL", "INFO").upper()
+
+    # Log output format for the main application logs written to stdout.
+    #   - "json":   one structured JSON object per line (for CloudWatch ingestion,
+    #               Requirements 8.1 / 8.7).
+    #   - "pretty": human-readable single-line text (development).
+    #   - "auto":   "json" when running on the AWS storage backend
+    #               (STORAGE_BACKEND=aws), otherwise "pretty".
+    # Regardless of format, secret values are redacted from log output
+    # (Requirements 6.5).
+    LOG_FORMAT = _cfg("LOG_FORMAT", "auto").lower()
+
+    # ==============================================================================================
+    # First Token Timeout Settings (Streaming Retry)
+    # ==============================================================================================
+
+    # Timeout for waiting for the first token from the model (in seconds).
+    # Default: 15 seconds.
+    FIRST_TOKEN_TIMEOUT = float(_cfg("FIRST_TOKEN_TIMEOUT", "15"))
+
+    # Read timeout for streaming responses (in seconds).
+    # Default: 300 seconds (5 minutes).
+    STREAMING_READ_TIMEOUT = float(_cfg("STREAMING_READ_TIMEOUT", "300"))
+
+    # Maximum number of attempts on first token timeout.
+    # Default: 3 attempts
+    FIRST_TOKEN_MAX_RETRIES = int(_cfg("FIRST_TOKEN_MAX_RETRIES", "3"))
+
+    # ==============================================================================================
+    # Debug Settings
+    # ==============================================================================================
+
+    # Debug logging mode:
+    # - off: disabled (default)
+    # - errors: save logs only for failed requests (4xx, 5xx)
+    # - all: save logs for every request (overwrites on each request)
+    _debug_mode_raw = (_cfg("DEBUG_MODE", "") or "").lower()
+    if _debug_mode_raw in ("off", "errors", "all"):
+        DEBUG_MODE = _debug_mode_raw
+    else:
+        DEBUG_MODE = "off"
+
+    # Directory for debug log files
+    DEBUG_DIR = _cfg("DEBUG_DIR", "debug_logs")
+
+    # ==============================================================================================
+    # Fake Reasoning Settings (Extended Thinking via Tag Injection)
+    # ==============================================================================================
+
+    # Enable fake reasoning - injects special tags into requests to enable model reasoning.
+    # Default: true (enabled) - provides premium experience out of the box
+    _fake_reasoning_raw = (_cfg("FAKE_REASONING", "") or "").lower()
+    # Default is True - if env var is not set or empty, enable fake reasoning
+    FAKE_REASONING_ENABLED = _fake_reasoning_raw not in ("false", "0", "no", "disabled", "off")
+
+    # Maximum thinking length in tokens (default budget when client doesn't specify).
+    # Default: 4000 tokens
+    FAKE_REASONING_MAX_TOKENS = int(_cfg("FAKE_REASONING_MAX_TOKENS", "4000"))
+
+    # Maximum budget cap for fake reasoning when client sends thinking budget.
+    # Default: 10000 tokens (2.5x default budget of 4000)
+    FAKE_REASONING_BUDGET_CAP = int(_cfg("FAKE_REASONING_BUDGET_CAP", "10000"))
+
+    # How to handle the thinking block in responses:
+    # Default: "as_reasoning_content"
+    _fake_reasoning_handling_raw = (_cfg("FAKE_REASONING_HANDLING", "as_reasoning_content") or "").lower()
+    if _fake_reasoning_handling_raw in ("as_reasoning_content", "remove", "pass", "strip_tags"):
+        FAKE_REASONING_HANDLING = _fake_reasoning_handling_raw
+    else:
+        FAKE_REASONING_HANDLING = "as_reasoning_content"
+
+    # Maximum size of initial buffer for tag detection (characters).
+    # Default: 20 characters (enough for longest tag + some whitespace)
+    FAKE_REASONING_INITIAL_BUFFER_SIZE = int(_cfg("FAKE_REASONING_INITIAL_BUFFER_SIZE", "20"))
+
+    # ==============================================================================================
+    # Payload Size Guard Settings
+    # ==============================================================================================
+
+    # Payload size limit in bytes (Kiro API rejects > ~615KB with cryptic 400 error)
+    # Default 600KB provides safety margin below the ~615KB hard limit
+    KIRO_MAX_PAYLOAD_BYTES = int(_cfg("KIRO_MAX_PAYLOAD_BYTES", "600000"))
+
+    # Auto-trim payload when over limit (default: false - disabled)
+    AUTO_TRIM_PAYLOAD = _cfg("AUTO_TRIM_PAYLOAD", "false").lower() in ("true", "1", "yes")
+
+    # ==============================================================================================
+    # WebSearch Settings (MCP Tool Emulation)
+    # ==============================================================================================
+
+    # Enable web_search tool auto-injection (default: true)
+    WEB_SEARCH_ENABLED = _cfg("WEB_SEARCH_ENABLED", "true").lower() in ("true", "1", "yes")
+
+    # ==============================================================================================
+    # Account System Settings
+    # ==============================================================================================
+
+    # Enable account system with failover (default: false)
+    # When false: uses first account without failover (legacy mode)
+    # When true: enables full failover loop with Circuit Breaker
+    ACCOUNT_SYSTEM = _cfg("ACCOUNT_SYSTEM", "false").lower() in ("true", "1", "yes")
+
+    # Path to credentials configuration file
+    ACCOUNTS_CONFIG_FILE = _cfg("ACCOUNTS_CONFIG_FILE", "credentials.json")
+
+    # Path to runtime state file
+    ACCOUNTS_STATE_FILE = _cfg("ACCOUNTS_STATE_FILE", "state.json")
+
+    # ==============================================================================================
+    # Circuit Breaker Settings
+    # ==============================================================================================
+
+    # Base recovery timeout in seconds (for exponential backoff)
+    # Actual timeout = BASE * 2^(failures - 1), capped at BASE * MAX_MULTIPLIER
+    ACCOUNT_RECOVERY_TIMEOUT = int(_cfg("ACCOUNT_RECOVERY_TIMEOUT", "60"))
+
+    # Maximum backoff multiplier (cap for exponential backoff)
+    # With BASE=60s and MAX=1440, maximum cooldown is 60 * 1440 = 86400s = 1 day
+    ACCOUNT_MAX_BACKOFF_MULTIPLIER = float(_cfg("ACCOUNT_MAX_BACKOFF_MULTIPLIER", "1440.0"))
+
+    # Probabilistic retry chance for "broken" accounts (0.0 - 1.0)
+    # Default: 0.1 (10% chance) - prevents permanent "stuck" state
+    ACCOUNT_PROBABILISTIC_RETRY_CHANCE = float(_cfg("ACCOUNT_PROBABILISTIC_RETRY_CHANCE", "0.1"))
+
+    # ==============================================================================================
+    # Account Cache Settings
+    # ==============================================================================================
+
+    # Model cache TTL in seconds (12 hours)
+    # Cache is refreshed only when account is used (not in background)
+    ACCOUNT_CACHE_TTL = int(_cfg("ACCOUNT_CACHE_TTL", "43200"))
+
+    # ==============================================================================================
+    # State Persistence Settings
+    # ==============================================================================================
+
+    # Interval for periodic state.json saving in seconds
+    STATE_SAVE_INTERVAL_SECONDS = int(_cfg("STATE_SAVE_INTERVAL_SECONDS", "10"))
+
+
+def set_config_provider(provider) -> None:
+    """
+    Inject the active :class:`ConfigProvider` (used at start-up by the storage
+    backend factory) and re-evaluate all environment-sourced configuration
+    constants from it.
+
+    With the default ``local`` backend this is behaviourally identical to the
+    previous ``os.getenv`` based loading. With the ``aws`` backend it allows
+    values from SSM Parameter Store / S3 to take effect (Requirements 5.1, 5.3,
+    5.5).
+
+    Args:
+        provider: An object implementing the ``ConfigProvider`` protocol. When
+            ``None``, the default process-environment provider is restored.
+    """
+    global _config_provider
+    _config_provider = provider if provider is not None else _EnvConfigProvider()
+    _load_config()
+
+
+# Evaluate configuration once at import time using the default provider so that
+# ``from kiro.config import X`` keeps working exactly as before.
+_load_config()
 
 
 def _warn_timeout_configuration():
@@ -415,150 +609,6 @@ def _warn_timeout_configuration():
 """
         print(warning_text, file=sys.stderr)
 
-# ==================================================================================================
-# Fake Reasoning Settings (Extended Thinking via Tag Injection)
-# ==================================================================================================
-
-# Enable fake reasoning - injects special tags into requests to enable model reasoning.
-# When enabled, the model will include its reasoning process in the response wrapped in tags.
-# The response is then parsed and converted to OpenAI-compatible reasoning_content format.
-#
-# WHY "FAKE"? This is NOT native extended thinking API support. Instead, we inject
-# <thinking_mode>enabled</thinking_mode> tags into the prompt, and the model responds
-# with <thinking>...</thinking> blocks that we parse and convert to reasoning_content.
-# It works great, but it's a hack - hence "fake" reasoning.
-#
-# Default: true (enabled) - provides premium experience out of the box
-_FAKE_REASONING_RAW: str = os.getenv("FAKE_REASONING", "").lower()
-# Default is True - if env var is not set or empty, enable fake reasoning
-FAKE_REASONING_ENABLED: bool = _FAKE_REASONING_RAW not in ("false", "0", "no", "disabled", "off")
-
-# Maximum thinking length in tokens (default budget when client doesn't specify).
-# This value is injected into the request as <max_thinking_length>{value}</max_thinking_length>
-# Higher values allow for more detailed reasoning but increase response time and token usage.
-# Default: 4000 tokens
-FAKE_REASONING_MAX_TOKENS: int = int(os.getenv("FAKE_REASONING_MAX_TOKENS", "4000"))
-
-# Maximum budget cap for fake reasoning when client sends thinking budget.
-#
-# WHY CAP? Fake reasoning uses output tokens (not separate thinking tokens like native API).
-# Large budgets can cause the model to spend ALL output tokens on reasoning with NOTHING
-# left for actual content. This cap prevents that.
-#
-# Default: 10000 tokens (2.5x default budget of 4000)
-# - Allows deeper reasoning than default
-# - Prevents excessive token consumption
-# - Still leaves room for actual response
-#
-# Set to 0 to disable capping (not recommended for production).
-FAKE_REASONING_BUDGET_CAP: int = int(os.getenv("FAKE_REASONING_BUDGET_CAP", "10000"))
-
-# How to handle the thinking block in responses:
-# - "as_reasoning_content": Extract to reasoning_content field (OpenAI-compatible, recommended)
-# - "remove": Remove thinking block completely, return only final answer
-# - "pass": Pass through as-is with original tags in content
-# - "strip_tags": Remove tags but keep thinking content in regular content
-#
-# Default: "as_reasoning_content"
-_FAKE_REASONING_HANDLING_RAW: str = os.getenv("FAKE_REASONING_HANDLING", "as_reasoning_content").lower()
-if _FAKE_REASONING_HANDLING_RAW in ("as_reasoning_content", "remove", "pass", "strip_tags"):
-    FAKE_REASONING_HANDLING: str = _FAKE_REASONING_HANDLING_RAW
-else:
-    FAKE_REASONING_HANDLING: str = "as_reasoning_content"
-
-# List of opening tags to detect thinking blocks.
-# The parser will look for any of these tags at the start of the response.
-# Order matters - first match wins.
-FAKE_REASONING_OPEN_TAGS: List[str] = ["<thinking>", "<think>", "<reasoning>", "<thought>"]
-
-# Maximum size of initial buffer for tag detection (characters).
-# If no thinking tag is found within this limit, content is treated as regular response.
-# Lower values = faster first token, but may miss tags with leading whitespace.
-# Default: 30 characters (enough for longest tag + some whitespace)
-FAKE_REASONING_INITIAL_BUFFER_SIZE: int = int(os.getenv("FAKE_REASONING_INITIAL_BUFFER_SIZE", "20"))
-
-
-# ==================================================================================================
-# Payload Size Guard Settings
-# ==================================================================================================
-
-# Payload size limit in bytes (Kiro API rejects > ~615KB with cryptic 400 error)
-# Default 600KB provides safety margin below the ~615KB hard limit
-KIRO_MAX_PAYLOAD_BYTES: int = int(os.getenv("KIRO_MAX_PAYLOAD_BYTES", "600000"))
-
-# Auto-trim payload when over limit (default: false - disabled)
-# Enable this if you use many tools (30+) and hit "Improperly formed request" errors
-# When false, returns a clear error instead of trimming
-AUTO_TRIM_PAYLOAD: bool = os.getenv("AUTO_TRIM_PAYLOAD", "false").lower() in ("true", "1", "yes")
-
-# ==================================================================================================
-# WebSearch Settings (MCP Tool Emulation)
-# ==================================================================================================
-
-# Enable web_search tool auto-injection (default: true)
-# When enabled, web_search is automatically added as a tool for MCP emulation (Path B)
-# Model decides whether to use it or not
-#
-# Note: Native Anthropic server-side tools (Path A) work ALWAYS, regardless of this setting
-WEB_SEARCH_ENABLED: bool = os.getenv("WEB_SEARCH_ENABLED", "true").lower() in ("true", "1", "yes")
-
-# ==================================================================================================
-# Account System Settings
-# ==================================================================================================
-
-# Enable account system with failover (default: false)
-# When false: uses first account without failover (legacy mode)
-# When true: enables full failover loop with Circuit Breaker
-ACCOUNT_SYSTEM: bool = os.getenv("ACCOUNT_SYSTEM", "false").lower() in ("true", "1", "yes")
-
-# Path to credentials configuration file
-ACCOUNTS_CONFIG_FILE: str = os.getenv("ACCOUNTS_CONFIG_FILE", "credentials.json")
-
-# Path to runtime state file
-ACCOUNTS_STATE_FILE: str = os.getenv("ACCOUNTS_STATE_FILE", "state.json")
-
-# ==================================================================================================
-# Circuit Breaker Settings
-# ==================================================================================================
-
-# Base recovery timeout in seconds (for exponential backoff)
-# Actual timeout = BASE * 2^(failures - 1), capped at BASE * MAX_MULTIPLIER
-# Examples with BASE=60s, MAX=1440x:
-#   1 failure: 1m, 2: 2m, 3: 4m, 4: 8m, 5: 16m, 6: 32m, 7: 1h, 8: 2h, 9: 4h, 10: 8.5h, 11: 17h, 12+: 1d (cap)
-ACCOUNT_RECOVERY_TIMEOUT: int = int(os.getenv("ACCOUNT_RECOVERY_TIMEOUT", "60"))
-
-# Maximum backoff multiplier (cap for exponential backoff)
-# With BASE=60s and MAX=1440, maximum cooldown is 60 * 1440 = 86400s = 1 day
-ACCOUNT_MAX_BACKOFF_MULTIPLIER: float = float(os.getenv("ACCOUNT_MAX_BACKOFF_MULTIPLIER", "1440.0"))
-
-# Probabilistic retry chance for "broken" accounts (0.0 - 1.0)
-# Even if account is broken and timeout hasn't passed, try with this probability
-# Default: 0.1 (10% chance) - prevents permanent "stuck" state
-ACCOUNT_PROBABILISTIC_RETRY_CHANCE: float = float(os.getenv("ACCOUNT_PROBABILISTIC_RETRY_CHANCE", "0.1"))
-
-# ==================================================================================================
-# Account Cache Settings
-# ==================================================================================================
-
-# Model cache TTL in seconds (12 hours)
-# Cache is refreshed only when account is used (not in background)
-ACCOUNT_CACHE_TTL: int = int(os.getenv("ACCOUNT_CACHE_TTL", "43200"))
-
-# ==================================================================================================
-# State Persistence Settings
-# ==================================================================================================
-
-# Interval for periodic state.json saving in seconds
-STATE_SAVE_INTERVAL_SECONDS: int = int(os.getenv("STATE_SAVE_INTERVAL_SECONDS", "10"))
-
-# ==================================================================================================
-# Application Version
-# ==================================================================================================
-
-APP_VERSION: str = "2.4.dev.13"
-APP_TITLE: str = "Kiro Gateway"
-APP_DESCRIPTION: str = "Proxy gateway for Kiro API (Amazon Q Developer / AWS CodeWhisperer). OpenAI and Anthropic compatible. Made by @jwadow"
-
 
 def get_kiro_refresh_url(region: str) -> str:
     """Return Kiro Desktop Auth token refresh URL for the specified region."""
@@ -578,4 +628,3 @@ def get_kiro_api_host(region: str) -> str:
 def get_kiro_q_host(region: str) -> str:
     """Return Q API host for the specified region."""
     return KIRO_Q_HOST_TEMPLATE.format(region=region)
-

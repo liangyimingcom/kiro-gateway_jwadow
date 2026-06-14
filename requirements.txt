@@ -6,7 +6,11 @@ loguru
 python-dotenv
 tiktoken
 
+# AWS cloud-native backend (only required when STORAGE_BACKEND=aws)
+boto3
+
 # Testing dependencies
 pytest
 pytest-asyncio
 hypothesis
+moto[ssm,s3]

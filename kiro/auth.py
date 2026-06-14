@@ -48,7 +48,14 @@ from kiro.config import (
     get_kiro_q_host,
     get_aws_sso_oidc_url,
 )
+from kiro.backends.interfaces import TokenBundle
 from kiro.utils import get_machine_fingerprint
+
+
+# Single-flight refresh lease TTL (seconds) requested from the coordinator.
+_REFRESH_LOCK_TTL_SECONDS = 15
+# Bounded wait for another instance's refresh result before degrading to a local refresh.
+_REFRESH_WAIT_TIMEOUT_SECONDS = 10.0
 
 
 # Supported SQLite token keys (searched in priority order)
@@ -126,6 +133,9 @@ class KiroAuthManager:
         client_secret: Optional[str] = None,
         sqlite_db: Optional[str] = None,
         api_region: Optional[str] = None,
+        secret_provider=None,
+        coordinator=None,
+        account_id: Optional[str] = None,
     ):
         """
         Initializes the authentication manager.
@@ -141,12 +151,29 @@ class KiroAuthManager:
                        Default location: ~/.local/share/kiro-cli/data.sqlite3
             api_region: Q API region override (optional, per-account)
                        If not specified, uses auto-detection or falls back to region
+            secret_provider: Optional :class:`SecretProvider` used to persist
+                       refreshed tokens to the Secret_Store instead of (or in
+                       addition to) local credential files (Requirements 6.1,
+                       6.7). When ``None`` the gateway keeps its existing local
+                       file / SQLite write-back behaviour unchanged.
+            coordinator: Optional :class:`TokenRefreshCoordinator` used to make
+                       token refresh single-flight across instances. When
+                       ``None`` the existing in-process ``asyncio.Lock`` path is
+                       used (single-instance == single-flight).
+            account_id: Stable identifier used as the coordination / secret key
+                       (defaults to the credentials source path).
         """
         self._refresh_token = refresh_token
         self._profile_arn = profile_arn
         self._region = region
         self._creds_file = creds_file
         self._sqlite_db = sqlite_db
+
+        # Storage backend abstraction dependencies (optional; defaults preserve
+        # the original single-host file-based behaviour exactly).
+        self._secret_provider = secret_provider
+        self._coordinator = coordinator
+        self._account_key = account_id or creds_file or sqlite_db or "kiro-account"
         
         # AWS SSO OIDC specific fields
         self._client_id: Optional[str] = client_id
@@ -671,15 +698,95 @@ class KiroAuthManager:
         Routes to appropriate refresh method based on auth type:
         - KIRO_DESKTOP: Uses Kiro Desktop Auth endpoint
         - AWS_SSO_OIDC: Uses AWS SSO OIDC endpoint
+
+        When a :class:`TokenRefreshCoordinator` is injected, the refresh is made
+        single-flight across instances: only the lock holder calls the upstream
+        refresh endpoint, while others reuse the persisted result. With the local
+        ``NoopCoordinator`` (single instance) this is equivalent to refreshing
+        directly. When no coordinator is injected, behaviour is unchanged.
         
         Raises:
             ValueError: If refresh token is not set or response doesn't contain accessToken
             httpx.HTTPError: On HTTP request error
         """
+        if self._coordinator is None:
+            await self._dispatch_refresh()
+            return
+
+        acquired = await self._coordinator.acquire_lock(
+            self._account_key, _REFRESH_LOCK_TTL_SECONDS
+        )
+        if acquired:
+            try:
+                await self._dispatch_refresh()
+                try:
+                    await self._coordinator.store_refreshed_token(
+                        self._account_key, self._build_token_bundle()
+                    )
+                except Exception as e:  # pragma: no cover - defensive
+                    logger.debug(f"Failed to store refreshed token in coordinator: {e}")
+            finally:
+                await self._coordinator.release_lock(self._account_key)
+        else:
+            # Another instance is refreshing - wait (bounded) and reuse its result.
+            bundle = await self._coordinator.wait_for_token(
+                self._account_key, _REFRESH_WAIT_TIMEOUT_SECONDS
+            )
+            if bundle is not None and bundle.access_token:
+                self._apply_token_bundle(bundle)
+            else:
+                # Degrade: refresh ourselves to avoid blocking indefinitely.
+                await self._dispatch_refresh()
+
+    async def _dispatch_refresh(self) -> None:
+        """Route to the auth-type specific refresh implementation."""
         if self._auth_type == AuthType.AWS_SSO_OIDC:
             await self._refresh_token_aws_sso_oidc()
         else:
             await self._refresh_token_kiro_desktop()
+
+    def _build_token_bundle(self) -> TokenBundle:
+        """Capture the current credentials as a :class:`TokenBundle`."""
+        return TokenBundle(
+            access_token=self._access_token,
+            refresh_token=self._refresh_token,
+            expires_at=self._expires_at.timestamp() if self._expires_at else None,
+            profile_arn=self._profile_arn,
+            region=self._sso_region or self._region,
+        )
+
+    def _apply_token_bundle(self, bundle: TokenBundle) -> None:
+        """Apply a token bundle produced by another instance's refresh."""
+        if bundle.access_token:
+            self._access_token = bundle.access_token
+        if bundle.refresh_token:
+            self._refresh_token = bundle.refresh_token
+        if bundle.profile_arn:
+            self._profile_arn = bundle.profile_arn
+        if bundle.expires_at is not None:
+            self._expires_at = datetime.fromtimestamp(bundle.expires_at, tz=timezone.utc)
+
+    async def _persist_refreshed_token(self) -> None:
+        """
+        Persist the freshly refreshed token through the injected
+        :class:`SecretProvider` (e.g. Secrets Manager) so refreshed tokens are
+        not written back to local files in the cloud-native form
+        (Requirements 6.7). No-op when no secret provider is injected; the local
+        file / SQLite write-back path is unaffected.
+        """
+        if self._secret_provider is None:
+            return
+        try:
+            payload = json.dumps({
+                "access_token": self._access_token,
+                "refresh_token": self._refresh_token,
+                "expires_at": self._expires_at.isoformat() if self._expires_at else None,
+                "profile_arn": self._profile_arn,
+                "region": self._sso_region or self._region,
+            })
+            await self._secret_provider.put_secret(self._account_key, payload)
+        except Exception as e:  # pragma: no cover - defensive
+            logger.error(f"Failed to persist refreshed token via secret provider: {e}")
     
     async def _refresh_token_kiro_desktop(self) -> None:
         """
@@ -739,6 +846,10 @@ class KiroAuthManager:
             self._save_credentials_to_sqlite()
         else:
             self._save_credentials_to_file()
+
+        # Persist through the Secret_Store when a SecretProvider is injected
+        # (cloud-native form). Local file/SQLite write-back above is unchanged.
+        await self._persist_refreshed_token()
     
     async def _refresh_token_aws_sso_oidc(self) -> None:
         """
@@ -866,6 +977,10 @@ class KiroAuthManager:
             self._save_credentials_to_sqlite()
         else:
             self._save_credentials_to_file()
+
+        # Persist through the Secret_Store when a SecretProvider is injected
+        # (cloud-native form). Local file/SQLite write-back above is unchanged.
+        await self._persist_refreshed_token()
     
     async def get_access_token(self) -> str:
         """

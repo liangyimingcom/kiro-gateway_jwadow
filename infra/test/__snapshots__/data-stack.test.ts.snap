@@ -1,0 +1,736 @@
+// Jest Snapshot v1, https://goo.gl/fbAQLP
+
+exports[`DataStack — 快照 合成模板匹配快照（回归保护） 1`] = `
+{
+  "Outputs": {
+    "AccountSecretPrefix": {
+      "Description": "各账号 token 密钥名称前缀。",
+      "Value": "test-gateway/account",
+    },
+    "ConfigBucketName": {
+      "Description": "S3 配置桶名称。",
+      "Value": {
+        "Ref": "ConfigBucket2112C5EC",
+      },
+    },
+    "ConfigParameterPrefix": {
+      "Description": "SSM Config_Store 参数前缀。",
+      "Value": "/test-gateway/config",
+    },
+    "CredentialsJsonSecretArn": {
+      "Description": "credentials.json 密钥 ARN。",
+      "Value": {
+        "Ref": "CredentialsJsonSecret1DF5C77F",
+      },
+    },
+    "DebugLogsBucketName": {
+      "Description": "S3 调试日志桶名称（保留 30 天）。",
+      "Value": {
+        "Ref": "DebugLogsBucket58B78653",
+      },
+    },
+    "EncryptionKeyArn": {
+      "Description": "静态加密 KMS 密钥 ARN。",
+      "Value": {
+        "Fn::GetAtt": [
+          "DataKey17AFBB84",
+          "Arn",
+        ],
+      },
+    },
+    "ProxyApiKeySecretArn": {
+      "Description": "PROXY_API_KEY 密钥 ARN。",
+      "Value": {
+        "Ref": "ProxyApiKeySecret52630A5C",
+      },
+    },
+    "StateTableName": {
+      "Description": "DynamoDB State_Store 表名。",
+      "Value": {
+        "Ref": "StateTable9728C7E5",
+      },
+    },
+  },
+  "Parameters": {
+    "BootstrapVersion": {
+      "Default": "/cdk-bootstrap/hnb659fds/version",
+      "Description": "Version of the CDK Bootstrap resources in this environment, automatically retrieved from SSM Parameter Store. [cdk:skip]",
+      "Type": "AWS::SSM::Parameter::Value<String>",
+    },
+  },
+  "Resources": {
+    "ConfigBucket2112C5EC": {
+      "DeletionPolicy": "Retain",
+      "Properties": {
+        "BucketEncryption": {
+          "ServerSideEncryptionConfiguration": [
+            {
+              "BucketKeyEnabled": true,
+              "ServerSideEncryptionByDefault": {
+                "KMSMasterKeyID": {
+                  "Fn::GetAtt": [
+                    "DataKey17AFBB84",
+                    "Arn",
+                  ],
+                },
+                "SSEAlgorithm": "aws:kms",
+              },
+            },
+          ],
+        },
+        "BucketName": "test-gateway-gateway-config",
+        "PublicAccessBlockConfiguration": {
+          "BlockPublicAcls": true,
+          "BlockPublicPolicy": true,
+          "IgnorePublicAcls": true,
+          "RestrictPublicBuckets": true,
+        },
+        "Tags": [
+          {
+            "Key": "app",
+            "Value": "kiro-gateway",
+          },
+          {
+            "Key": "stack",
+            "Value": "test-gateway",
+          },
+        ],
+        "VersioningConfiguration": {
+          "Status": "Enabled",
+        },
+      },
+      "Type": "AWS::S3::Bucket",
+      "UpdateReplacePolicy": "Retain",
+    },
+    "ConfigBucketPolicy6D5E90FF": {
+      "Properties": {
+        "Bucket": {
+          "Ref": "ConfigBucket2112C5EC",
+        },
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "s3:*",
+              "Condition": {
+                "Bool": {
+                  "aws:SecureTransport": "false",
+                },
+              },
+              "Effect": "Deny",
+              "Principal": {
+                "AWS": "*",
+              },
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "ConfigBucket2112C5EC",
+                    "Arn",
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      {
+                        "Fn::GetAtt": [
+                          "ConfigBucket2112C5EC",
+                          "Arn",
+                        ],
+                      },
+                      "/*",
+                    ],
+                  ],
+                },
+              ],
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+      },
+      "Type": "AWS::S3::BucketPolicy",
+    },
+    "CredentialsJsonSecret1DF5C77F": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "Description": "test-gateway 多账号 credentials.json 敏感内容",
+        "GenerateSecretString": {
+          "GenerateStringKey": "placeholder",
+          "SecretStringTemplate": "{"accounts":[]}",
+        },
+        "KmsKeyId": {
+          "Fn::GetAtt": [
+            "DataKey17AFBB84",
+            "Arn",
+          ],
+        },
+        "Name": "test-gateway/credentials-json",
+        "Tags": [
+          {
+            "Key": "app",
+            "Value": "kiro-gateway",
+          },
+          {
+            "Key": "stack",
+            "Value": "test-gateway",
+          },
+        ],
+      },
+      "Type": "AWS::SecretsManager::Secret",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "CustomS3AutoDeleteObjectsCustomResourceProviderHandler9D90184F": {
+      "DependsOn": [
+        "CustomS3AutoDeleteObjectsCustomResourceProviderRole3B1BD092",
+      ],
+      "Properties": {
+        "Code": {
+          "S3Bucket": "cdk-hnb659fds-assets-123456789012-us-east-1",
+          "S3Key": "faa95a81ae7d7373f3e1f242268f904eb748d8d0fdd306e8a6fe515a1905a7d6.zip",
+        },
+        "Description": {
+          "Fn::Join": [
+            "",
+            [
+              "Lambda function for auto-deleting objects in ",
+              {
+                "Ref": "DebugLogsBucket58B78653",
+              },
+              " S3 bucket.",
+            ],
+          ],
+        },
+        "Handler": "index.handler",
+        "MemorySize": 128,
+        "Role": {
+          "Fn::GetAtt": [
+            "CustomS3AutoDeleteObjectsCustomResourceProviderRole3B1BD092",
+            "Arn",
+          ],
+        },
+        "Runtime": "nodejs24.x",
+        "Timeout": 900,
+      },
+      "Type": "AWS::Lambda::Function",
+    },
+    "CustomS3AutoDeleteObjectsCustomResourceProviderRole3B1BD092": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com",
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "ManagedPolicyArns": [
+          {
+            "Fn::Sub": "arn:\${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Role",
+    },
+    "DataKey17AFBB84": {
+      "DeletionPolicy": "Retain",
+      "Properties": {
+        "Description": "test-gateway gateway 静态加密密钥（DynamoDB / Secrets Manager / S3）",
+        "EnableKeyRotation": true,
+        "KeyPolicy": {
+          "Statement": [
+            {
+              "Action": "kms:*",
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":iam::123456789012:root",
+                    ],
+                  ],
+                },
+              },
+              "Resource": "*",
+            },
+            {
+              "Action": [
+                "kms:Decrypt",
+                "kms:Encrypt",
+                "kms:ReEncrypt*",
+                "kms:GenerateDataKey*",
+              ],
+              "Condition": {
+                "StringEquals": {
+                  "kms:ViaService": "secretsmanager.us-east-1.amazonaws.com",
+                },
+              },
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":iam::123456789012:root",
+                    ],
+                  ],
+                },
+              },
+              "Resource": "*",
+            },
+            {
+              "Action": [
+                "kms:CreateGrant",
+                "kms:DescribeKey",
+              ],
+              "Condition": {
+                "StringEquals": {
+                  "kms:ViaService": "secretsmanager.us-east-1.amazonaws.com",
+                },
+              },
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":iam::123456789012:root",
+                    ],
+                  ],
+                },
+              },
+              "Resource": "*",
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "Tags": [
+          {
+            "Key": "app",
+            "Value": "kiro-gateway",
+          },
+          {
+            "Key": "stack",
+            "Value": "test-gateway",
+          },
+        ],
+      },
+      "Type": "AWS::KMS::Key",
+      "UpdateReplacePolicy": "Retain",
+    },
+    "DataKeyAliasF989EB84": {
+      "Properties": {
+        "AliasName": "alias/test-gateway-gateway-data",
+        "TargetKeyId": {
+          "Fn::GetAtt": [
+            "DataKey17AFBB84",
+            "Arn",
+          ],
+        },
+      },
+      "Type": "AWS::KMS::Alias",
+    },
+    "DebugLogsBucket58B78653": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "BucketEncryption": {
+          "ServerSideEncryptionConfiguration": [
+            {
+              "BucketKeyEnabled": true,
+              "ServerSideEncryptionByDefault": {
+                "KMSMasterKeyID": {
+                  "Fn::GetAtt": [
+                    "DataKey17AFBB84",
+                    "Arn",
+                  ],
+                },
+                "SSEAlgorithm": "aws:kms",
+              },
+            },
+          ],
+        },
+        "BucketName": "test-gateway-gateway-debug",
+        "LifecycleConfiguration": {
+          "Rules": [
+            {
+              "AbortIncompleteMultipartUpload": {
+                "DaysAfterInitiation": 7,
+              },
+              "ExpirationInDays": 30,
+              "Id": "expire-debug-logs",
+              "Status": "Enabled",
+            },
+          ],
+        },
+        "PublicAccessBlockConfiguration": {
+          "BlockPublicAcls": true,
+          "BlockPublicPolicy": true,
+          "IgnorePublicAcls": true,
+          "RestrictPublicBuckets": true,
+        },
+        "Tags": [
+          {
+            "Key": "app",
+            "Value": "kiro-gateway",
+          },
+          {
+            "Key": "aws-cdk:auto-delete-objects",
+            "Value": "true",
+          },
+          {
+            "Key": "stack",
+            "Value": "test-gateway",
+          },
+        ],
+      },
+      "Type": "AWS::S3::Bucket",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "DebugLogsBucketAutoDeleteObjectsCustomResource6D468714": {
+      "DeletionPolicy": "Delete",
+      "DependsOn": [
+        "DebugLogsBucketPolicy2B58AB52",
+      ],
+      "Properties": {
+        "BucketName": {
+          "Ref": "DebugLogsBucket58B78653",
+        },
+        "ServiceToken": {
+          "Fn::GetAtt": [
+            "CustomS3AutoDeleteObjectsCustomResourceProviderHandler9D90184F",
+            "Arn",
+          ],
+        },
+      },
+      "Type": "Custom::S3AutoDeleteObjects",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "DebugLogsBucketPolicy2B58AB52": {
+      "Properties": {
+        "Bucket": {
+          "Ref": "DebugLogsBucket58B78653",
+        },
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "s3:*",
+              "Condition": {
+                "Bool": {
+                  "aws:SecureTransport": "false",
+                },
+              },
+              "Effect": "Deny",
+              "Principal": {
+                "AWS": "*",
+              },
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "DebugLogsBucket58B78653",
+                    "Arn",
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      {
+                        "Fn::GetAtt": [
+                          "DebugLogsBucket58B78653",
+                          "Arn",
+                        ],
+                      },
+                      "/*",
+                    ],
+                  ],
+                },
+              ],
+            },
+            {
+              "Action": [
+                "s3:PutBucketPolicy",
+                "s3:GetBucket*",
+                "s3:List*",
+                "s3:DeleteObject*",
+              ],
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::GetAtt": [
+                    "CustomS3AutoDeleteObjectsCustomResourceProviderRole3B1BD092",
+                    "Arn",
+                  ],
+                },
+              },
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "DebugLogsBucket58B78653",
+                    "Arn",
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      {
+                        "Fn::GetAtt": [
+                          "DebugLogsBucket58B78653",
+                          "Arn",
+                        ],
+                      },
+                      "/*",
+                    ],
+                  ],
+                },
+              ],
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+      },
+      "Type": "AWS::S3::BucketPolicy",
+    },
+    "ParamACCOUNTMAXBACKOFFMULTIPLIER491A67ED": {
+      "Properties": {
+        "Description": "账号熔断指数退避的最大倍数上限。",
+        "Name": "/test-gateway/config/ACCOUNT_MAX_BACKOFF_MULTIPLIER",
+        "Tags": {
+          "app": "kiro-gateway",
+          "stack": "test-gateway",
+        },
+        "Tier": "Standard",
+        "Type": "String",
+        "Value": "1440",
+      },
+      "Type": "AWS::SSM::Parameter",
+    },
+    "ParamACCOUNTPROBABILISTICRETRYCHANCEBE87E300": {
+      "Properties": {
+        "Description": "熔断窗口内的概率性重试机率（0–1）。",
+        "Name": "/test-gateway/config/ACCOUNT_PROBABILISTIC_RETRY_CHANCE",
+        "Tags": {
+          "app": "kiro-gateway",
+          "stack": "test-gateway",
+        },
+        "Tier": "Standard",
+        "Type": "String",
+        "Value": "0.1",
+      },
+      "Type": "AWS::SSM::Parameter",
+    },
+    "ParamACCOUNTRECOVERYTIMEOUTD6DB2ED5": {
+      "Properties": {
+        "Description": "账号熔断恢复基准超时（秒）。",
+        "Name": "/test-gateway/config/ACCOUNT_RECOVERY_TIMEOUT",
+        "Tags": {
+          "app": "kiro-gateway",
+          "stack": "test-gateway",
+        },
+        "Tier": "Standard",
+        "Type": "String",
+        "Value": "60",
+      },
+      "Type": "AWS::SSM::Parameter",
+    },
+    "ParamFIRSTTOKENTIMEOUT19F6F8F2": {
+      "Properties": {
+        "Description": "首个 token 到达超时（秒）。",
+        "Name": "/test-gateway/config/FIRST_TOKEN_TIMEOUT",
+        "Tags": {
+          "app": "kiro-gateway",
+          "stack": "test-gateway",
+        },
+        "Tier": "Standard",
+        "Type": "String",
+        "Value": "15",
+      },
+      "Type": "AWS::SSM::Parameter",
+    },
+    "ParamSTREAMINGREADTIMEOUTAC20BF32": {
+      "Properties": {
+        "Description": "流式读取超时（秒）。",
+        "Name": "/test-gateway/config/STREAMING_READ_TIMEOUT",
+        "Tags": {
+          "app": "kiro-gateway",
+          "stack": "test-gateway",
+        },
+        "Tier": "Standard",
+        "Type": "String",
+        "Value": "300",
+      },
+      "Type": "AWS::SSM::Parameter",
+    },
+    "ParamScalingCpuTarget47005466": {
+      "Properties": {
+        "Description": "CPU 目标跟踪伸缩的目标利用率（百分比）。",
+        "Name": "/test-gateway/config/scaling/cpu-target",
+        "Tags": {
+          "app": "kiro-gateway",
+          "stack": "test-gateway",
+        },
+        "Tier": "Standard",
+        "Type": "String",
+        "Value": "70",
+      },
+      "Type": "AWS::SSM::Parameter",
+    },
+    "ParamScalingMax8B25D079": {
+      "Properties": {
+        "Description": "Auto Scaling 最大实例数。",
+        "Name": "/test-gateway/config/scaling/max",
+        "Tags": {
+          "app": "kiro-gateway",
+          "stack": "test-gateway",
+        },
+        "Tier": "Standard",
+        "Type": "String",
+        "Value": "6",
+      },
+      "Type": "AWS::SSM::Parameter",
+    },
+    "ParamScalingMinBE8585E3": {
+      "Properties": {
+        "Description": "Auto Scaling 最小实例数。",
+        "Name": "/test-gateway/config/scaling/min",
+        "Tags": {
+          "app": "kiro-gateway",
+          "stack": "test-gateway",
+        },
+        "Tier": "Standard",
+        "Type": "String",
+        "Value": "2",
+      },
+      "Type": "AWS::SSM::Parameter",
+    },
+    "ProxyApiKeySecret52630A5C": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "Description": "test-gateway 客户端鉴权密钥 PROXY_API_KEY",
+        "GenerateSecretString": {
+          "ExcludePunctuation": true,
+          "ExcludeUppercase": false,
+          "PasswordLength": 48,
+        },
+        "KmsKeyId": {
+          "Fn::GetAtt": [
+            "DataKey17AFBB84",
+            "Arn",
+          ],
+        },
+        "Name": "test-gateway/proxy-api-key",
+        "Tags": [
+          {
+            "Key": "app",
+            "Value": "kiro-gateway",
+          },
+          {
+            "Key": "stack",
+            "Value": "test-gateway",
+          },
+        ],
+      },
+      "Type": "AWS::SecretsManager::Secret",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "StateTable9728C7E5": {
+      "DeletionPolicy": "Retain",
+      "Properties": {
+        "AttributeDefinitions": [
+          {
+            "AttributeName": "PK",
+            "AttributeType": "S",
+          },
+          {
+            "AttributeName": "SK",
+            "AttributeType": "S",
+          },
+        ],
+        "BillingMode": "PAY_PER_REQUEST",
+        "KeySchema": [
+          {
+            "AttributeName": "PK",
+            "KeyType": "HASH",
+          },
+          {
+            "AttributeName": "SK",
+            "KeyType": "RANGE",
+          },
+        ],
+        "PointInTimeRecoverySpecification": {
+          "PointInTimeRecoveryEnabled": true,
+        },
+        "SSESpecification": {
+          "KMSMasterKeyId": {
+            "Fn::GetAtt": [
+              "DataKey17AFBB84",
+              "Arn",
+            ],
+          },
+          "SSEEnabled": true,
+          "SSEType": "KMS",
+        },
+        "TableName": "test-gateway-gateway-state",
+        "Tags": [
+          {
+            "Key": "app",
+            "Value": "kiro-gateway",
+          },
+          {
+            "Key": "stack",
+            "Value": "test-gateway",
+          },
+        ],
+        "TimeToLiveSpecification": {
+          "AttributeName": "expires_at",
+          "Enabled": true,
+        },
+      },
+      "Type": "AWS::DynamoDB::Table",
+      "UpdateReplacePolicy": "Retain",
+    },
+  },
+  "Rules": {
+    "CheckBootstrapVersion": {
+      "Assertions": [
+        {
+          "Assert": {
+            "Fn::Not": [
+              {
+                "Fn::Contains": [
+                  [
+                    "1",
+                    "2",
+                    "3",
+                    "4",
+                    "5",
+                  ],
+                  {
+                    "Ref": "BootstrapVersion",
+                  },
+                ],
+              },
+            ],
+          },
+          "AssertDescription": "CDK bootstrap stack version 6 required. Please run 'cdk bootstrap' with a recent version of the CDK CLI.",
+        },
+      ],
+    },
+  },
+}
+`;
